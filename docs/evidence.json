@@ -1,0 +1,49 @@
+{
+  "at": "2026-10-18T01:15:00.504Z",
+  "testnetToken": {
+    "chainId": 31611,
+    "address": "0x118917a40FAF1CD7a13dB0Ef56C86De7973Ac503",
+    "name": "Mezo USD",
+    "symbol": "MUSD",
+    "decimals": 18,
+    "totalSupply": "523692374.067481604023211843",
+    "block": 16217672
+  },
+  "mainnetToken": {
+    "chainId": 31612,
+    "address": "0xdD468A1DDc392dcdbEf6db6e34E89AA338F9F186",
+    "name": "Mezo USD",
+    "symbol": "MUSD",
+    "decimals": 18,
+    "totalSupply": "29789446.675024547685037942",
+    "block": 12585187
+  },
+  "holderBalance": "38210825700027446161068038",
+  "simulations": {
+    "plain": {
+      "link": "ethereum:0x118917a40FAF1CD7a13dB0Ef56C86De7973Ac503@31611/transfer?address=0x52908400098527886E0F7030069857D2E4169EE7&uint256=1250000000000000000",
+      "data": "0xa9059cbb00000000000000000000000052908400098527886e0f7030069857d2e4169ee70000000000000000000000000000000000000000000000001158e460913d0000",
+      "returns": true
+    },
+    "memo": {
+      "link": "ethereum:0x118917a40FAF1CD7a13dB0Ef56C86De7973Ac503@31611/transfer?address=0x52908400098527886E0F7030069857D2E4169EE7&uint256=1250000000000000000&memo=INV-1042",
+      "data": "0xa9059cbb00000000000000000000000052908400098527886e0f7030069857d2e4169ee70000000000000000000000000000000000000000000000001158e460913d0000494e562d31303432",
+      "returns": true
+    }
+  },
+  "verifyReal": {
+    "status": "paid",
+    "paid": "245.20190755",
+    "confirmations": 5741,
+    "memoMatched": null,
+    "block": 16211933
+  },
+  "verifyTooHigh": {
+    "status": "mismatch",
+    "message": "MUSD received by the recipient in this transaction is 245.20190755, expected 245.201907550000000001."
+  },
+  "verifyWrongRecipient": {
+    "status": "mismatch",
+    "message": "MUSD received by the recipient in this transaction is 0, expected 0.000000000000000001."
+  }
+}

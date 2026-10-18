@@ -1,0 +1,41 @@
+{
+  "name": "musd-pay-links",
+  "version": "0.1.0",
+  "description": "Safe EIP-681 payment links and QR codes for MUSD on Mezo",
+  "license": "MIT",
+  "author": "Michael Lip (https://github.com/theluckystrike)",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "build:client": "esbuild web/client.ts --bundle --format=esm --target=es2022 --minify --outfile=web/public/client.js",
+    "build": "npm run build:client",
+    "dev": "npm run build && wrangler dev",
+    "deploy": "npm run build && wrangler deploy",
+    "evidence": "node --experimental-strip-types scripts/evidence.ts",
+    "testnet-pay": "node --experimental-strip-types scripts/testnet-pay.ts"
+  },
+  "dependencies": {
+    "qrcode-generator": "2.0.4",
+    "viem": "2.51.3"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "4.20260702.1",
+    "@types/node": "22.18.0",
+    "esbuild": "0.28.2",
+    "typescript": "5.9.3",
+    "vitest": "5.0.3",
+    "wrangler": "4.145.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "workerd"
+    ],
+    "overrides": {
+      "ws": "8.21.3"
+    }
+  },
+  "packageManager": "pnpm@10.30.3"
+}

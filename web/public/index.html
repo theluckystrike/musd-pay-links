@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MUSD Pay Links</title>
+<meta name="description" content="Payment links and QR codes for MUSD on Mezo, with a payer-side guard that checks the token, the recipient and the amount before any transfer is built.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23c2410c'/%3E%3Cpath d='M9 22V10l7 7 7-7v12' stroke='white' stroke-width='3' fill='none' stroke-linejoin='round'/%3E%3C/svg%3E">
+<style>
+:root {
+  --bg: #f7f5f1; --panel: #ffffff; --ink: #1c1a17; --muted: #6b655c; --line: #e4dfd6;
+  --accent: #c2410c; --accent-ink: #ffffff; --ok: #15803d; --ok-bg: #ecfdf3; --bad: #b91c1c; --bad-bg: #fef2f2;
+  --code: #f1ede6; --focus: #2563eb;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #14130f; --panel: #1d1b17; --ink: #f2efe9; --muted: #a39d92; --line: #34302a;
+    --accent: #fb923c; --accent-ink: #1c1a17; --ok: #4ade80; --ok-bg: #0f2a1a; --bad: #f87171; --bad-bg: #2d1414;
+    --code: #26231e; --focus: #60a5fa;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #14130f; --panel: #1d1b17; --ink: #f2efe9; --muted: #a39d92; --line: #34302a;
+  --accent: #fb923c; --accent-ink: #1c1a17; --ok: #4ade80; --ok-bg: #0f2a1a; --bad: #f87171; --bad-bg: #2d1414;
+  --code: #26231e; --focus: #60a5fa;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 1080px; margin: 0 auto; padding: 24px 16px 64px; }
+header { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: baseline; justify-content: space-between; margin-bottom: 8px; }
+h1 { font-size: 28px; margin: 0; letter-spacing: -0.01em; }
+h2 { font-size: 18px; margin: 0 0 4px; }
+.lede { color: var(--muted); max-width: 70ch; margin: 4px 0 20px; }
+a { color: var(--accent); }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 820px) { .grid { grid-template-columns: 1fr; } }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px; min-width: 0; }
+.panel p.sub { margin: 0 0 14px; color: var(--muted); font-size: 14px; }
+label { display: block; font-size: 13px; font-weight: 600; margin: 12px 0 4px; }
+input, select, textarea { width: 100%; font: 14px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; }
+textarea { min-height: 92px; resize: vertical; word-break: break-all; }
+input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.row > * { flex: 1 1 140px; }
+button { font: 600 14px/1 system-ui, sans-serif; border-radius: 8px; padding: 10px 14px; border: 1px solid var(--accent); background: var(--accent); color: var(--accent-ink); cursor: pointer; }
+button.ghost { background: transparent; color: var(--ink); border-color: var(--line); }
+button:disabled { opacity: .5; cursor: not-allowed; }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+.chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.chips button { font-size: 12px; padding: 6px 9px; background: transparent; color: var(--ink); border-color: var(--line); font-weight: 500; }
+.out { margin-top: 14px; }
+.verdict { border-radius: 10px; padding: 12px 14px; border: 1px solid; }
+.verdict.ok { background: var(--ok-bg); border-color: var(--ok); }
+.verdict.bad { background: var(--bad-bg); border-color: var(--bad); }
+.verdict strong { display: block; margin-bottom: 4px; }
+.verdict.ok strong { color: var(--ok); }
+.verdict.bad strong { color: var(--bad); }
+.verdict ul { margin: 6px 0 0; padding-left: 18px; }
+.verdict code { font-size: 12px; }
+dl.kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 8px 0 0; font-size: 14px; }
+dl.kv dt { color: var(--muted); }
+dl.kv dd { margin: 0; font-family: ui-monospace, Menlo, monospace; word-break: break-all; }
+pre, .mono { font: 12px/1.45 ui-monospace, Menlo, monospace; background: var(--code); border-radius: 8px; padding: 10px; overflow-x: auto; word-break: break-all; white-space: pre-wrap; margin: 8px 0 0; }
+.qr { background: #fff; border-radius: 10px; padding: 8px; width: 220px; max-width: 100%; margin-top: 12px; }
+.qr svg { display: block; width: 100%; height: auto; }
+.wide { grid-column: 1 / -1; }
+.chain-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 620px) { .chain-cards { grid-template-columns: 1fr; } }
+.muted { color: var(--muted); font-size: 13px; }
+.note { font-size: 13px; color: var(--muted); border-left: 3px solid var(--accent); padding-left: 10px; margin-top: 14px; }
+footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>MUSD Pay Links</h1>
+    <span class="muted">Mezo Buildathon, Access and Distribution track</span>
+  </header>
+  <p class="lede">A merchant asks for MUSD with a standard EIP-681 link or QR code. Before the payer's wallet or agent builds the transfer, the guard checks that the token is the real MUSD for that chain, that the recipient address is valid and checksummed, and that the amount is within the payer's limit. Every refusal says why.</p>
+
+  <section class="panel wide" id="live" aria-labelledby="live-h">
+    <h2 id="live-h">Live MUSD contracts</h2>
+    <p class="sub">Read just now from the MUSD contracts over the public Mezo RPC, through this Worker. Nothing here is hard-coded except the contract addresses.</p>
+    <div class="chain-cards" id="live-cards"><div class="muted">Reading the contracts...</div></div>
+  </section>
+
+  <div class="grid" style="margin-top:16px">
+    <section class="panel" aria-labelledby="m-h">
+      <h2 id="m-h">1. Merchant: request MUSD</h2>
+      <p class="sub">Creates the link and QR code. The link is run through the payer guard before it is shown.</p>
+      <label for="m-chain">Network</label>
+      <select id="m-chain">
+        <option value="31611">Mezo Testnet (31611)</option>
+        <option value="31612">Mezo Mainnet (31612)</option>
+      </select>
+      <label for="m-to">Your address (recipient)</label>
+      <input id="m-to" autocomplete="off" spellcheck="false" value="0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed">
+      <div class="row">
+        <div><label for="m-amount">Amount in MUSD</label><input id="m-amount" inputmode="decimal" value="12.50"></div>
+        <div><label for="m-memo">Reference (optional)</label><input id="m-memo" maxlength="32" value="INV-1042"></div>
+      </div>
+      <div class="actions"><button id="m-go">Create link</button></div>
+      <div class="out" id="m-out" aria-live="polite"></div>
+    </section>
+
+    <section class="panel" aria-labelledby="p-h">
+      <h2 id="p-h">2. Payer: check before paying</h2>
+      <p class="sub">Paste any link. The checks run in your browser with the same library the API uses.</p>
+      <label for="p-link">Payment link</label>
+      <textarea id="p-link" spellcheck="false"></textarea>
+      <div class="muted">Try a bad link</div>
+      <div class="chips" id="p-examples"></div>
+      <div class="row">
+        <div><label for="p-max">Your limit in MUSD</label><input id="p-max" inputmode="decimal" value="50"></div>
+        <div><label for="p-check">Checksum</label>
+          <select id="p-check"><option value="1">Required</option><option value="0">Not required</option></select></div>
+      </div>
+      <label for="p-allow">Allowlist (optional, one address per line)</label>
+      <textarea id="p-allow" spellcheck="false" style="min-height:56px"></textarea>
+      <div class="actions">
+        <button id="p-go">Check link</button>
+        <button id="p-pay" class="ghost" disabled>Pay with browser wallet</button>
+      </div>
+      <div class="out" id="p-out" aria-live="polite"></div>
+    </section>
+
+    <section class="panel wide" aria-labelledby="v-h">
+      <h2 id="v-h">3. Merchant: confirm the payment on chain</h2>
+      <p class="sub">Reads the transaction receipt and counts MUSD Transfer events from the real MUSD contract to your address. Prefilled with a public MUSD transfer on Mezo Testnet made by someone else on 17 October 2026, so you can see a real result.</p>
+      <div class="row">
+        <div style="flex:3 1 320px"><label for="v-tx">Transaction hash</label><input id="v-tx" spellcheck="false" value="0xfc56e25bdddcba0e1d2b43e7c92958d3fa9021d6e814e2dae430a83f7418d805"></div>
+        <div><label for="v-chain">Network</label><select id="v-chain"><option value="31611">Mezo Testnet</option><option value="31612">Mezo Mainnet</option></select></div>
+      </div>
+      <div class="row">
+        <div style="flex:3 1 320px"><label for="v-to">Recipient</label><input id="v-to" spellcheck="false" value="0x484b5593BbB90383f94FB299470F09427cf6cfE2"></div>
+        <div><label for="v-amount">Expected MUSD</label><input id="v-amount" value="245.20190755"></div>
+        <div><label for="v-memo">Reference</label><input id="v-memo" value=""></div>
+      </div>
+      <div class="actions"><button id="v-go">Verify payment</button></div>
+      <div class="out" id="v-out" aria-live="polite"></div>
+    </section>
+  </div>
+
+  <footer>
+    Open source under the MIT license: <a href="https://github.com/theluckystrike/musd-pay-links">github.com/theluckystrike/musd-pay-links</a>.
+    JSON API at <code>/api/check</code>, <code>/api/link</code>, <code>/api/verify</code>, <code>/api/token</code>. Built by Michael Lip, Warsaw, Poland.
+  </footer>
+</main>
+<script type="module" src="/client.js"></script>
+</body>
+</html>
