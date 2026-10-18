@@ -4,6 +4,8 @@ Payment links and QR codes for MUSD on Mezo, with a payer-side guard that checks
 
 Live demo at https://musd-pay-links.lipmichal.workers.dev
 
+Pitch deck, 10 slides, in [docs/pitch-deck.pdf](docs/pitch-deck.pdf). The slides are also in [docs/deck](docs/deck) as PNG files.
+
 <img src="docs/demo-desktop.png" alt="MUSD Pay Links demo page" width="100%">
 
 ## What it does
