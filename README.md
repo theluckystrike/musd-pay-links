@@ -10,13 +10,13 @@ Pitch deck, 10 slides, in [docs/pitch-deck.pdf](docs/pitch-deck.pdf). The slides
 
 ## What it does
 
-A merchant who wants MUSD needs a way to ask for it that any wallet understands. EIP-681 already defines that link format, and a QR code of the link works at a counter or on an invoice. The weak point is the payer side. A link is just text, and one changed character can send the money to another address, ask for a fake token, or move the payment to another chain.
+A merchant who wants MUSD needs a way to ask for it that wallets and agents can read. EIP-681 already defines a link format for an ERC-20 transfer, and a QR code of the link works at a counter or on an invoice. The weak point is the payer side. A link is just text, and one changed character can send the money to another address, ask for a fake token, or move the payment to another chain.
 
 MUSD Pay Links has three parts.
 
 1. The merchant side creates a standard EIP-681 link and a QR code for MUSD on Mezo, with the amount, the recipient and an optional reference such as an invoice number.
 2. The payer side is a TypeScript library (and the same code in the demo page) that parses the link and refuses it unless three checks pass. The token must be the real MUSD contract for that chain id. The recipient must be a valid address with a correct EIP-55 checksum, and on the payer's allowlist when one is set. The amount must be within the payer's limit, compared with exact integer math at 18 decimals. Every refusal comes with a code and a plain reason.
-3. The merchant can then confirm the payment on chain. The verifier reads the receipt and counts only Transfer events emitted by the real MUSD contract to the merchant's address.
+3. The merchant can then confirm the payment on chain. The verifier reads the receipt and counts only Transfer events emitted by the real MUSD contract to the merchant's address. When the link carried a reference, the verifier also requires the payment input to end with the same reference. A payment that does not carry it is refused, so one old payment cannot mark several invoices paid.
 
 The library never holds a key and never signs. It returns an unsigned transaction (`to` is the MUSD contract, `value` is 0, `data` is `transfer(recipient, amount)`) for the wallet or agent to sign.
 
@@ -29,7 +29,7 @@ Both addresses come from the official Mezo docs, page "MUSD Payments With x402" 
 | Mezo Testnet | 31611 | [`0x118917a40FAF1CD7a13dB0Ef56C86De7973Ac503`](https://explorer.test.mezo.org/token/0x118917a40FAF1CD7a13dB0Ef56C86De7973Ac503) | `https://rpc.test.mezo.org` |
 | Mezo Mainnet | 31612 | [`0xdD468A1DDc392dcdbEf6db6e34E89AA338F9F186`](https://explorer.mezo.org/token/0xdD468A1DDc392dcdbEf6db6e34E89AA338F9F186) | `https://mezo.drpc.org` |
 
-Chain ids and RPC endpoints are from https://mezo.org/docs/developers/getting-started/ and were confirmed with `eth_chainId`.
+Chain ids and RPC endpoints are from https://mezo.org/docs/developers/getting-started/ and from https://mezo.org/docs/developers/getting-started/configure-environment/, and were confirmed with `eth_chainId`. The Mezo docs list one testnet endpoint and several mainnet providers. Read retries wait 300 ms times the attempt number, and for mainnet a read falls back to a second provider from the same docs table (https://mezo-mainnet.boar.network) when the first does not answer. There is no documented testnet fallback, so testnet reads rely on the retries.
 
 ## Link format
 
@@ -37,7 +37,9 @@ The merchant link is plain EIP-681 for an ERC-20 transfer, with one optional ext
 
 `ethereum:0x118917a40FAF1CD7a13dB0Ef56C86De7973Ac503@31611/transfer?address=0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed&uint256=12500000000000000000&memo=INV-1042`
 
-The `uint256` value is in base units (12.5 MUSD here). The `memo` is up to 32 characters from a small ASCII set. When it is present, the guard appends its bytes after the ABI arguments of the `transfer` call. The MUSD contract ignores the extra bytes (an `eth_call` dry run on testnet returns `true` with and without them), and the merchant's verifier can match the reference in the transaction input.
+The `uint256` value is in base units (12.5 MUSD here). The `memo` is up to 32 characters. Letters, digits and the characters dot, underscore, colon, slash and hyphen are allowed. The `#` character is not allowed, because `#` starts an EIP-681 fragment and would truncate the link. When a memo is present, the guard appends its bytes after the ABI arguments of the `transfer` call. The MUSD contract ignores the extra bytes (an `eth_call` dry run on testnet returns `true` with and without them), and the merchant's verifier can match the reference in the transaction input.
+
+Wallet support is not proven here. EIP-681 token links are a standard, but wallet support for them varies, and `memo` is not part of EIP-681, so it is likely that a wallet that does not know the parameter will build the transfer without the reference. Mezo Testnet and Mezo Mainnet also have to be added to most wallets before a link is useful. No wallet has been tested with this project's links yet, and the tested-wallet table will be added when that testing is done.
 
 ## Use the library
 
@@ -95,12 +97,15 @@ The attacker controls the link text. They may also control the page or message t
 | Two `address` or two `uint256` values (wallets disagree on which wins) | Refused | `duplicate_param` |
 | `approve`, `transferFrom`, `increaseAllowance`, `permit` | Refused, only `transfer` is allowed | `dangerous_function` |
 | Very long links, fragments, malformed queries, ENS names | Refused | `too_long`, `fragment`, `malformed_query`, `ens_or_bad_target` |
+| Replay of an older payment under a new invoice reference | The verifier requires the payment input to carry the link's reference, otherwise `mismatch` | `mismatch` |
 
 Out of scope. The guard does not judge whether the merchant is honest, and it does not replace the wallet's own confirmation screen. It does not check sanctions lists. A payer who sets a high limit and no allowlist can still pay a real but unwanted address. The verifier trusts the RPC node it reads from (the Worker uses the public Mezo RPC endpoints listed above).
 
-## Testnet transfer status
+## Testnet payment status
 
-No real testnet transfer was made for this submission, and none is shown as if it were. Testnet MUSD is minted by opening a borrow position against testnet BTC (the Mezo docs give a minimum debt of 2,000 MUSD), and the testnet BTC faucet at https://faucet.test.mezo.org is protected by a Cloudflare Turnstile CAPTCHA. An agent cannot get past that on its own.
+No real payment has been made yet. No merchant payment and no testnet transfer of our own exists for this submission, and none is shown as if it were. Testnet MUSD is minted by opening a borrow position against testnet BTC, and the testnet BTC faucet at https://faucet.test.mezo.org is protected by a Cloudflare Turnstile CAPTCHA. An agent cannot get past that on its own.
+
+The verify panel is prefilled with a public MUSD transfer on Mezo Testnet that someone else made on 17 October 2026 ([`0xfc56e25b...d805`](https://explorer.test.mezo.org/tx/0xfc56e25bdddcba0e1d2b43e7c92958d3fa9021d6e814e2dae430a83f7418d805)). That transaction is a contract to contract MUSD movement. The recipient `0x484b...cfE2` is a contract that forwards the MUSD on, not a merchant address, so it is an honest example of a verified transfer and not an example of a merchant payment.
 
 What is verified instead, against the real contracts and with no key.
 
@@ -109,13 +114,13 @@ What is verified instead, against the real contracts and with no key.
 | `name()`, `symbol()`, `decimals()` on testnet and mainnet MUSD | "Mezo USD", "MUSD", 18 on both |
 | `eth_call` dry run of the guard's transfer data from a public testnet MUSD holder, without memo | returns `true` |
 | The same dry run with the memo bytes appended | returns `true` |
-| `verifyPayment` on a public testnet MUSD transfer made by someone else on 17 October 2026 ([`0xfc56e25b...d805`](https://explorer.test.mezo.org/tx/0xfc56e25bdddcba0e1d2b43e7c92958d3fa9021d6e814e2dae430a83f7418d805)) | `paid`, 245.20190755 MUSD |
+| `verifyPayment` on the public testnet MUSD transfer above, no reference given | `paid`, 245.20190755 MUSD |
 | The same transaction checked against 1 base unit more | `mismatch` |
 | The same transaction checked against another recipient | `mismatch` |
 
 The raw output is in [docs/evidence.json](docs/evidence.json). Run `pnpm evidence` to read it again.
 
-The demo page can make a real payment. Open it in a browser with a wallet that holds testnet MUSD, check a link, and press "Pay with browser wallet". The page switches the wallet to Mezo Testnet, reads the MUSD balance, asks the wallet to sign the checked transaction, and then confirms the receipt with the verifier. For a command line run there is `scripts/testnet-pay.ts`, which reads a key from a file outside the repo.
+The demo page has a payment path that has not been used yet. In code, a payer can open the page in a browser with a wallet that holds testnet MUSD, check a link, and press "Pay with browser wallet". The page switches the wallet to Mezo Testnet, reads the MUSD balance, asks the wallet to sign the checked transaction, and then confirms the receipt with the verifier. This path has not been run with a real wallet. For a command line run there is `scripts/testnet-pay.ts`, which reads a key from a file outside the repo.
 
 ## Setup
 
@@ -139,33 +144,35 @@ MEZO_KEY_FILE=/path/to/key pnpm testnet-pay "ethereum..." 5
 
 ## Test output
 
-Run on 18 October 2026 with `LIVE=1 pnpm test`.
+Run on 19 October 2026 with `LIVE=1 pnpm test`.
 
 ```text
- ✓ test/amount.test.ts (52 tests) 10ms
- ✓ test/address.test.ts (20 tests) 16ms
- ✓ test/guard.test.ts (91 tests) 33ms
- ✓ test/merchant.test.ts (13 tests) 29ms
- ✓ test/worker.test.ts (8 tests) 37ms
- ✓ test/rpc.test.ts (13 tests) 1614ms
+ ✓ test/amount.test.ts (52 tests) 20ms
+ ✓ test/address.test.ts (20 tests) 20ms
+ ✓ test/guard.test.ts (93 tests) 62ms
+ ✓ test/merchant.test.ts (15 tests) 49ms
+ ✓ test/worker.test.ts (8 tests) 54ms
+ ✓ test/rpc.test.ts (16 tests) 9100ms
    ✓ live Mezo RPC (LIVE=1) (2)
-     ✓ testnet MUSD reports Mezo USD, MUSD, 18 decimals 1049ms
-     ✓ mainnet MUSD reports Mezo USD, MUSD, 18 decimals 542ms
+     ✓ testnet MUSD reports Mezo USD, MUSD, 18 decimals 938ms
+     ✓ mainnet MUSD reports Mezo USD, MUSD, 18 decimals 595ms
  Test Files  6 passed (6)
-      Tests  197 passed (197)
+      Tests  204 passed (204)
 ```
 
-The guard suite covers wrong chains, lookalike tokens, uint256 overflow and wraparound, bad checksums, eleven unicode tricks, percent-encoding, extra and duplicated parameters, dangerous functions, and 2,000 random inputs that must never throw. The merchant suite creates 300 links with pseudo-random amounts and checks that each one passes the guard with the same amount. `pnpm typecheck` passes and `pnpm audit --prod` reports no known vulnerabilities.
+Without network, `pnpm test` gives 202 passed and 2 skipped.
+
+The guard suite covers wrong chains, lookalike tokens, uint256 overflow and wraparound, bad checksums, eleven unicode tricks, percent-encoding, extra and duplicated parameters, dangerous functions, and 2,000 random inputs that must never throw. The merchant suite creates 300 links with pseudo-random amounts and checks that each one passes the guard with the same amount. The verifier suite uses a fake RPC that answers null twice and then the receipt, and a fake RPC that fails twice and then answers, and it checks that a payment without the link's reference is refused. `pnpm typecheck` passes and `pnpm audit --prod` reports no known vulnerabilities.
 
 ## Project layout
 
 | Path | Contents |
 |---|---|
-| `src/chains.ts` | Mezo chain ids, MUSD addresses, RPC and explorer URLs, with sources |
+| `src/chains.ts` | Mezo chain ids, MUSD addresses, RPC endpoints (with the documented fallback) and explorer URLs, with sources |
 | `src/eip681.ts` | Strict EIP-681 parser |
 | `src/guard.ts` | Payer policy checks and transfer builder |
 | `src/merchant.ts` | Link creation with a round trip through the guard |
-| `src/rpc.ts` | Live contract reads, dry runs and payment verification |
+| `src/rpc.ts` | Live contract reads with retries and a fallback endpoint, dry runs and payment verification |
 | `src/worker.ts` | Cloudflare Worker API |
 | `web/` | Demo page |
 | `scripts/` | Evidence and testnet payment scripts |

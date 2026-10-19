@@ -42,6 +42,18 @@ describe("createPaymentLink", () => {
     if (!r.ok) expect(r.reasons.map((x) => x.code)).toContain(code);
   });
 
+  it("refuses a memo with a #, since # starts a fragment and the rule does not list it", () => {
+    const r = createPaymentLink({ chainId: 31611, recipient: SHOP, amount: "1", memo: "INV#1" });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reasons.map((x) => x.code)).toContain("bad_memo");
+  });
+
+  it("accepts the documented memo characters, including a colon", () => {
+    const r = createPaymentLink({ chainId: 31611, recipient: SHOP, amount: "1", memo: "INV-2026:01/a_b.c" });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.link.endsWith("&memo=INV-2026:01/a_b.c")).toBe(true);
+  });
+
   it("every created link passes the payer guard with the same amount (300 cases)", () => {
     let x = 12345n;
     for (let i = 0; i < 300; i++) {

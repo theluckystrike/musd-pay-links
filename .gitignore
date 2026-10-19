@@ -4,3 +4,4 @@ web/public/client.js
 .dev.vars
 *.key
 .secrets/
+.oc-*.log

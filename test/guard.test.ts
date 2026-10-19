@@ -282,6 +282,16 @@ describe("extra and malformed parameters", () => {
     expect(codes(link({ query: `?address=${SHOP}&uint256=1&memo=a+b` }))).toEqual(["bad_memo"]);
   });
 
+  it("refuses a memo with a #, so the memo rule and the parser agree", () => {
+    expect(codes(link({ query: `?address=${SHOP}&uint256=1&memo=INV#1` }))).toEqual(["fragment"]);
+  });
+
+  it("accepts the documented memo characters, including a colon", () => {
+    const r = checkPaymentLink(link({ query: `?address=${SHOP}&uint256=1&memo=INV-2026:01/a_b.c` }), policy);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.payment.memo).toBe("INV-2026:01/a_b.c");
+  });
+
   it("refuses a link over 512 characters", () => {
     expect(codes(link({ query: `?address=${SHOP}&uint256=1&memo=${"x".repeat(600)}` }))).toEqual(["too_long"]);
   });

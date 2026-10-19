@@ -10,8 +10,13 @@ export type Fetch = (input: string, init?: RequestInit) => Promise<Response>;
 
 export const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 
-export async function rpc<T>(chain: MezoChain, method: string, params: unknown[], fetchImpl: Fetch = fetch): Promise<T> {
-  const res = await fetchImpl(chain.rpc, {
+/** Wait between two retries of a read, multiplied by the attempt number. */
+export const RETRY_DELAY_MS = 300;
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+async function rpcAt<T>(url: string, method: string, params: unknown[], fetchImpl: Fetch): Promise<T> {
+  const res = await fetchImpl(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
@@ -20,6 +25,25 @@ export async function rpc<T>(chain: MezoChain, method: string, params: unknown[]
   const body = (await res.json()) as { result?: T; error?: { message: string } };
   if (body.error) throw new Error(`RPC ${method} error ${body.error.message}`);
   return body.result as T;
+}
+
+/**
+ * One read of one method. Tries the chain's endpoints in turn, retries a transport or RPC error
+ * with a growing backoff, and throws only when every try failed.
+ */
+export async function rpc<T>(chain: MezoChain, method: string, params: unknown[], fetchImpl: Fetch = fetch, tries = 3): Promise<T> {
+  const urls = rpcEndpoints(chain);
+  let lastError: unknown = null;
+  for (let i = 0; i < tries; i++) {
+    const url = urls[i % urls.length]!;
+    try {
+      return await rpcAt<T>(url, method, params, fetchImpl);
+    } catch (e) {
+      lastError = e;
+    }
+    if (i < tries - 1) await sleep(RETRY_DELAY_MS * (i + 1));
+  }
+  throw lastError;
 }
 
 async function call(chain: MezoChain, data: `0x${string}`, fetchImpl?: Fetch, from?: string): Promise<`0x${string}`> {
@@ -78,7 +102,10 @@ export interface VerifyInput {
 
 export type VerifyResult =
   | { status: "paid"; paid: string; confirmations: number; memoMatched: boolean | null; block: number }
-  | { status: "pending" | "not_found" | "failed" | "mismatch"; message: string };
+  | { status: "pending" | "not_found" | "failed" | "mismatch" | "unavailable"; message: string };
+
+/** Shown when every RPC try failed, so the reader does not mistake it for an invalid payment. */
+export const NETWORK_UNAVAILABLE_MESSAGE = "The network did not answer. Try again in a moment.";
 
 interface Receipt {
   status: string;
@@ -87,26 +114,48 @@ interface Receipt {
   logs: { address: string; topics: string[]; data: string }[];
 }
 
+function rpcEndpoints(chain: MezoChain): string[] {
+  return chain.rpcFallback ? [chain.rpc, chain.rpcFallback] : [chain.rpc];
+}
+
 /**
  * Some public RPC nodes behind a load balancer lag behind and answer null for a mined transaction.
- * Ask again a few times before treating null as the answer.
+ * Ask again a few times, waiting 300 ms times the attempt number, and switch to the chain's second
+ * documented endpoint when there is one. Returns null only when every try answered null. Throws when
+ * no endpoint answered at all.
  */
-async function rpcNotNull<T>(chain: MezoChain, method: string, params: unknown[], fetchImpl?: Fetch, tries = 4): Promise<T | null> {
+async function rpcNotNull<T>(chain: MezoChain, method: string, params: unknown[], fetchImpl: Fetch = fetch, tries = 4): Promise<T | null> {
+  const urls = rpcEndpoints(chain);
+  let lastError: unknown = null;
   for (let i = 0; i < tries; i++) {
-    const r = await rpc<T | null>(chain, method, params, fetchImpl);
-    if (r !== null && r !== undefined) return r;
+    const url = urls[i % urls.length]!;
+    try {
+      const r = await rpcAt<T | null>(url, method, params, fetchImpl);
+      if (r !== null && r !== undefined) return r;
+    } catch (e) {
+      lastError = e;
+    }
+    if (i < tries - 1) await sleep(RETRY_DELAY_MS * (i + 1));
   }
+  if (lastError) throw lastError;
   return null;
 }
 
 /** Merchant check: did this transaction move at least `amount` MUSD to `recipient`? */
 export async function verifyPayment(chain: MezoChain, input: VerifyInput, fetchImpl?: Fetch): Promise<VerifyResult> {
   if (!/^0x[0-9a-fA-F]{64}$/.test(input.txHash)) return { status: "not_found", message: "Not a transaction hash." };
-  const [receipt, tx, head] = await Promise.all([
-    rpcNotNull<Receipt>(chain, "eth_getTransactionReceipt", [input.txHash], fetchImpl),
-    rpcNotNull<{ input: string; to: string | null }>(chain, "eth_getTransactionByHash", [input.txHash], fetchImpl),
-    rpc<string>(chain, "eth_blockNumber", [], fetchImpl),
-  ]);
+  let receipt: Receipt | null;
+  let tx: { input: string; to: string | null } | null;
+  let headRaw: string | null;
+  try {
+    [receipt, tx, headRaw] = await Promise.all([
+      rpcNotNull<Receipt>(chain, "eth_getTransactionReceipt", [input.txHash], fetchImpl),
+      rpcNotNull<{ input: string; to: string | null }>(chain, "eth_getTransactionByHash", [input.txHash], fetchImpl),
+      rpcNotNull<string>(chain, "eth_blockNumber", [], fetchImpl),
+    ]);
+  } catch {
+    return { status: "unavailable", message: NETWORK_UNAVAILABLE_MESSAGE };
+  }
   if (!tx) return { status: "not_found", message: `No transaction ${input.txHash} on ${chain.name}.` };
   if (!receipt) return { status: "pending", message: "The transaction is not mined yet." };
   if (receipt.status !== "0x1") return { status: "failed", message: "The transaction reverted." };
@@ -124,7 +173,16 @@ export async function verifyPayment(chain: MezoChain, input: VerifyInput, fetchI
     };
   }
   let memoMatched: boolean | null = null;
-  if (input.memo) memoMatched = tx.input.toLowerCase().endsWith(memoToHex(input.memo).slice(2).toLowerCase());
+  if (input.memo) {
+    memoMatched = tx.input.toLowerCase().endsWith(memoToHex(input.memo).slice(2).toLowerCase());
+    if (!memoMatched) {
+      return {
+        status: "mismatch",
+        message: `This payment does not carry the reference ${input.memo} in its input data, so it cannot mark this invoice paid.`,
+      };
+    }
+  }
   const block = Number(receipt.blockNumber);
-  return { status: "paid", paid: formatAmount(paid), confirmations: Number(head) - block + 1, memoMatched, block };
+  const head = headRaw ? Number(headRaw) : block;
+  return { status: "paid", paid: formatAmount(paid), confirmations: head - block + 1, memoMatched, block };
 }

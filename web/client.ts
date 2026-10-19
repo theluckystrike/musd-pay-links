@@ -137,7 +137,7 @@ async function payWithWallet(): Promise<void> {
       const q = new URLSearchParams({ chain: String(chain.id), tx: hash, to: payment.recipient, amount: payment.amountText, memo: payment.memo ?? "" });
       const v = (await (await fetch(`/api/verify?${q}`)).json()) as { status: string; confirmations?: number; message?: string };
       if (v.status === "paid") {
-        status(`Confirmed on chain: ${esc(payment.amountText)} MUSD received, ${v.confirmations} confirmation(s). <a href="${chain.explorer}/tx/${esc(hash)}" target="_blank" rel="noopener">View in explorer</a>`);
+        status(`Confirmed on chain. ${esc(payment.amountText)} MUSD received, ${v.confirmations} confirmation(s). <a href="${chain.explorer}/tx/${esc(hash)}" target="_blank" rel="noopener">View in explorer</a>`);
         return;
       }
       if (v.status !== "pending" && v.status !== "not_found") {
@@ -150,6 +150,16 @@ async function payWithWallet(): Promise<void> {
   }
 }
 
+const VERIFY_RETRY_MESSAGE = "The network did not answer in time. Try again in a moment.";
+const VERIFY_TRIES = 3;
+
+function renderVerify(v: Record<string, unknown>, paid: boolean): string {
+  const head = paid ? `Paid. ${esc(String(v.paid))} MUSD reached the recipient.` : esc(String(v.message ?? v.error ?? v.status));
+  return `<div class="verdict ${paid ? "ok" : "bad"}"><strong>${head}</strong>
+    ${paid ? `<dl class="kv"><dt>Block</dt><dd>${v.block}</dd><dt>Confirmations</dt><dd>${v.confirmations}</dd><dt>Reference</dt><dd>${v.memoMatched === null ? "not checked" : v.memoMatched ? "matches" : "does not match"}</dd></dl>` : ""}
+    ${v.explorer ? `<div style="margin-top:6px"><a href="${esc(String(v.explorer))}" target="_blank" rel="noopener">Open in explorer</a></div>` : ""}</div>`;
+}
+
 async function runVerify(): Promise<void> {
   const q = new URLSearchParams({
     chain: $<HTMLSelectElement>("v-chain").value,
@@ -158,14 +168,28 @@ async function runVerify(): Promise<void> {
     amount: $("v-amount").value.trim(),
     memo: $("v-memo").value.trim(),
   });
-  $("v-out").innerHTML = `<div class="muted">Reading the receipt from Mezo...</div>`;
-  const res = await fetch(`/api/verify?${q}`);
-  const v = (await res.json()) as Record<string, unknown>;
-  const ok = v.status === "paid";
-  const head = ok ? `Paid. ${esc(String(v.paid))} MUSD reached the recipient.` : esc(String(v.message ?? v.error ?? v.status));
-  $("v-out").innerHTML = `<div class="verdict ${ok ? "ok" : "bad"}"><strong>${head}</strong>
-    ${ok ? `<dl class="kv"><dt>Block</dt><dd>${v.block}</dd><dt>Confirmations</dt><dd>${v.confirmations}</dd><dt>Reference</dt><dd>${v.memoMatched === null ? "not checked" : v.memoMatched ? "matches" : "does not match"}</dd></dl>` : ""}
-    ${v.explorer ? `<div style="margin-top:6px"><a href="${esc(String(v.explorer))}" target="_blank" rel="noopener">Open in explorer</a></div>` : ""}</div>`;
+  const out = $("v-out");
+  for (let attempt = 1; attempt <= VERIFY_TRIES; attempt++) {
+    out.innerHTML = `<div class="muted">Reading the receipt from Mezo, attempt ${attempt} of ${VERIFY_TRIES}...</div>`;
+    let v: Record<string, unknown>;
+    try {
+      const res = await fetch(`/api/verify?${q}`);
+      v = (await res.json()) as Record<string, unknown>;
+    } catch {
+      v = { status: "unavailable" };
+    }
+    const status = String(v.status ?? (v.error ? "unavailable" : ""));
+    if (status === "not_found" || status === "pending" || status === "unavailable") {
+      if (attempt < VERIFY_TRIES) {
+        await new Promise((resolve) => setTimeout(resolve, 1000 * attempt));
+        continue;
+      }
+      out.innerHTML = `<div class="verdict bad"><strong>${esc(VERIFY_RETRY_MESSAGE)}</strong></div>`;
+      return;
+    }
+    out.innerHTML = renderVerify(v, status === "paid");
+    return;
+  }
 }
 
 async function loadLive(): Promise<void> {

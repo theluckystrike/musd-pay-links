@@ -85,7 +85,7 @@ async function api(url: URL): Promise<Response> {
     case "/api/check": {
       const allow = (p.get("allow") ?? "").split(",").map((s) => s.trim()).filter(Boolean);
       const max = p.get("max");
-      if (!max) return bad("max is required: the most MUSD you are willing to pay, for example max=50");
+      if (!max) return bad("max is required. Enter the most MUSD you are willing to pay, for example max=50");
       const r = checkPaymentLink(p.get("link") ?? "", {
         maxAmount: max,
         allowlist: allow.length ? allow : undefined,
@@ -119,7 +119,7 @@ export default {
       try {
         return await api(url);
       } catch (e) {
-        return bad(`upstream error: ${(e as Error).message}`, 502);
+        return bad(`The network did not answer. Try again in a moment. (${(e as Error).message})`, 502);
       }
     }
     return env.ASSETS.fetch(req);

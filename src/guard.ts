@@ -62,7 +62,7 @@ function checkToken(target: string, chainId: number, requireChecksum: boolean, r
   const chain = chainById(chainId)!;
   const addr = checkAddress(target, false);
   if (!addr.ok) {
-    reasons.push({ code: `token_${addr.code}`, message: `Token address: ${addr.message}` });
+    reasons.push({ code: `token_${addr.code}`, message: `Token address ${addr.message}` });
     return;
   }
   const lower = target.toLowerCase();
@@ -95,7 +95,7 @@ function checkRecipient(value: string | undefined, policy: PayerPolicy, requireC
   }
   const r = checkAddress(value, requireChecksum);
   if (!r.ok) {
-    reasons.push({ code: `recipient_${r.code}`, message: `Recipient: ${r.message}` });
+    reasons.push({ code: `recipient_${r.code}`, message: `Recipient ${r.message}` });
     return null;
   }
   const lower = r.address.toLowerCase();
@@ -194,7 +194,7 @@ export function checkPaymentLink(link: unknown, policy: PayerPolicy): CheckResul
   const amount = checkAmount(raw.params.get("uint256"), limit, reasons);
   const memo = raw.params.get("memo") ?? null;
   if (memo !== null && !MEMO_PATTERN.test(memo)) {
-    reasons.push({ code: "bad_memo", message: "The memo must be 1 to 32 characters from A-Z a-z 0-9 . _ : # / -" });
+    reasons.push({ code: "bad_memo", message: "The memo must be 1 to 32 characters. Letters, digits and the characters dot, underscore, colon, slash and hyphen are allowed. The # character is not." });
   }
   if (reasons.length > 0 || recipient === null || amount === null) return { ok: false, reasons };
 

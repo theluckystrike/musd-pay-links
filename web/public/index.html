@@ -87,7 +87,7 @@ footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
 
   <div class="grid" style="margin-top:16px">
     <section class="panel" aria-labelledby="m-h">
-      <h2 id="m-h">1. Merchant: request MUSD</h2>
+      <h2 id="m-h">1. Merchant, request MUSD</h2>
       <p class="sub">Creates the link and QR code. The link is run through the payer guard before it is shown.</p>
       <label for="m-chain">Network</label>
       <select id="m-chain">
@@ -105,7 +105,7 @@ footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
     </section>
 
     <section class="panel" aria-labelledby="p-h">
-      <h2 id="p-h">2. Payer: check before paying</h2>
+      <h2 id="p-h">2. Payer, check before paying</h2>
       <p class="sub">Paste any link. The checks run in your browser with the same library the API uses.</p>
       <label for="p-link">Payment link</label>
       <textarea id="p-link" spellcheck="false"></textarea>
@@ -126,8 +126,8 @@ footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
     </section>
 
     <section class="panel wide" aria-labelledby="v-h">
-      <h2 id="v-h">3. Merchant: confirm the payment on chain</h2>
-      <p class="sub">Reads the transaction receipt and counts MUSD Transfer events from the real MUSD contract to your address. Prefilled with a public MUSD transfer on Mezo Testnet made by someone else on 17 October 2026, so you can see a real result.</p>
+      <h2 id="v-h">3. Merchant, confirm the payment on chain</h2>
+      <p class="sub">Reads the transaction receipt and counts MUSD Transfer events from the real MUSD contract to the address you enter. Prefilled with a public MUSD transfer on Mezo Testnet made by someone else on 17 October 2026. That transfer was a contract to contract MUSD movement, not a payment to a merchant, and no merchant payment has been made yet. Verification retries a few times if the public RPC lags.</p>
       <div class="row">
         <div style="flex:3 1 320px"><label for="v-tx">Transaction hash</label><input id="v-tx" spellcheck="false" value="0xfc56e25bdddcba0e1d2b43e7c92958d3fa9021d6e814e2dae430a83f7418d805"></div>
         <div><label for="v-chain">Network</label><select id="v-chain"><option value="31611">Mezo Testnet</option><option value="31612">Mezo Mainnet</option></select></div>

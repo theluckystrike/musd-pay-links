@@ -2,7 +2,7 @@ import { encodeAbiParameters } from "viem";
 import { describe, expect, it } from "vitest";
 
 import { MEZO_MAINNET, MEZO_TESTNET } from "../src/chains.ts";
-import { readBalance, readTokenInfo, TRANSFER_TOPIC, verifyPayment, type Fetch } from "../src/rpc.ts";
+import { NETWORK_UNAVAILABLE_MESSAGE, readBalance, readTokenInfo, TRANSFER_TOPIC, verifyPayment, type Fetch } from "../src/rpc.ts";
 
 const SHOP = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed";
 const HASH = "0x" + "ab".repeat(32);
@@ -38,10 +38,10 @@ describe("verifyPayment", () => {
     expect(r).toEqual({ status: "paid", paid: "0.000000000000000005", confirmations: 10, memoMatched: true, block: 100 });
   });
 
-  it("reports a memo that does not match", async () => {
+  it("refuses a payment whose input does not carry the invoice reference", async () => {
     const f = mockRpc({ ...base, eth_getTransactionReceipt: () => receipt([{ address: MEZO_TESTNET.musd, to: SHOP, value: 5n }]) });
     const r = await verifyPayment(MEZO_TESTNET, { txHash: HASH, recipient: SHOP, amount: 5n, memo: "INV-2" }, f);
-    expect(r).toMatchObject({ status: "paid", memoMatched: false });
+    expect(r).toMatchObject({ status: "mismatch" });
   });
 
   it("ignores Transfer events from a fake token contract", async () => {
@@ -86,6 +86,46 @@ describe("verifyPayment", () => {
     });
     expect(await verifyPayment(MEZO_TESTNET, { txHash: HASH, recipient: SHOP, amount: 5n }, f)).toMatchObject({ status: "paid" });
     expect(calls).toBe(3);
+  });
+
+  it("retries a transport error twice and then answers", async () => {
+    let calls = 0;
+    const f = mockRpc({
+      ...base,
+      eth_getTransactionReceipt: () => {
+        calls++;
+        if (calls <= 2) throw new Error("network down");
+        return receipt([{ address: MEZO_TESTNET.musd, to: SHOP, value: 5n }]);
+      },
+    });
+    expect(await verifyPayment(MEZO_TESTNET, { txHash: HASH, recipient: SHOP, amount: 5n }, f)).toMatchObject({ status: "paid" });
+    expect(calls).toBe(3);
+  });
+
+  it("falls back to the second documented mainnet endpoint when the first does not answer", async () => {
+    const urls: string[] = [];
+    const f: Fetch = async (url, init) => {
+      urls.push(url);
+      if (url === MEZO_MAINNET.rpc) throw new Error("primary down");
+      const { method } = JSON.parse(String(init!.body)) as { method: string };
+      const result =
+        method === "eth_getTransactionReceipt"
+          ? receipt([{ address: MEZO_MAINNET.musd, to: SHOP, value: 5n }])
+          : method === "eth_getTransactionByHash"
+            ? { input: "0x", to: MEZO_MAINNET.musd }
+            : "0x6d";
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result }));
+    };
+    expect(await verifyPayment(MEZO_MAINNET, { txHash: HASH, recipient: SHOP, amount: 5n }, f)).toMatchObject({ status: "paid" });
+    expect(urls).toContain(MEZO_MAINNET.rpcFallback);
+  });
+
+  it("reports an unavailable network, not an invalid payment, when every RPC try fails", async () => {
+    const f: Fetch = async () => {
+      throw new Error("network down");
+    };
+    const r = await verifyPayment(MEZO_TESTNET, { txHash: HASH, recipient: SHOP, amount: 5n }, f);
+    expect(r).toEqual({ status: "unavailable", message: NETWORK_UNAVAILABLE_MESSAGE });
   });
 
   it("refuses a malformed hash without any network call", async () => {

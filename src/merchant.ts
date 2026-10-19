@@ -23,7 +23,7 @@ export function createPaymentLink(input: LinkInput): CreateResult {
   if (!chain) reasons.push({ code: "wrong_chain", message: `Chain ${input.chainId} is not Mezo (31611 or 31612).` });
 
   const recipient = checkAddress(String(input.recipient ?? "").trim(), false);
-  if (!recipient.ok) reasons.push({ code: `recipient_${recipient.code}`, message: `Recipient: ${recipient.message}` });
+  if (!recipient.ok) reasons.push({ code: `recipient_${recipient.code}`, message: `Recipient ${recipient.message}` });
 
   const units = parseAmount(String(input.amount ?? "").trim());
   if (units === null) {
@@ -34,7 +34,7 @@ export function createPaymentLink(input: LinkInput): CreateResult {
 
   const memo = input.memo?.trim() ? input.memo.trim() : undefined;
   if (memo !== undefined && !MEMO_PATTERN.test(memo)) {
-    reasons.push({ code: "bad_memo", message: "Memo must be 1 to 32 characters from A-Z a-z 0-9 . _ : # / -" });
+    reasons.push({ code: "bad_memo", message: "Memo must be 1 to 32 characters. Letters, digits and the characters dot, underscore, colon, slash and hyphen are allowed. The # character is not." });
   }
   if (reasons.length > 0 || !chain || !recipient.ok || units === null) return { ok: false, reasons };
 

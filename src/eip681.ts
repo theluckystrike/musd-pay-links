@@ -17,7 +17,7 @@ export const ALLOWED_PARAMS = new Set(["address", "uint256", "memo"]);
 const EXECUTION_PARAMS = new Set(["value", "gas", "gaslimit", "gasprice", "maxfeepergas", "maxpriorityfeepergas", "nonce", "data"]);
 const DANGEROUS_FUNCTIONS = new Set(["approve", "increaseallowance", "transferfrom", "permit", "setapprovalforall"]);
 
-export const MEMO_PATTERN = /^[A-Za-z0-9._:#/-]{1,32}$/;
+export const MEMO_PATTERN = /^[A-Za-z0-9._:/-]{1,32}$/;
 
 function describeCodePoint(cp: number): string {
   const hex = "U+" + cp.toString(16).toUpperCase().padStart(4, "0");
