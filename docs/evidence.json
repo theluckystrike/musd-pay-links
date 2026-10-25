@@ -1,5 +1,5 @@
 {
-  "at": "2026-10-25T14:22:08.287Z",
+  "at": "2026-10-25T15:02:50.721Z",
   "testnetToken": {
     "chainId": 31611,
     "address": "0x118917a40FAF1CD7a13dB0Ef56C86De7973Ac503",
@@ -7,7 +7,7 @@
     "symbol": "MUSD",
     "decimals": 18,
     "totalSupply": "523893019.239097900397485064",
-    "block": 16361833
+    "block": 16362420
   },
   "mainnetToken": {
     "chainId": 31612,
@@ -16,7 +16,7 @@
     "symbol": "MUSD",
     "decimals": 18,
     "totalSupply": "29482016.986182972908040124",
-    "block": 12756525
+    "block": 12757205
   },
   "holderBalance": "38210825700027446161068038",
   "simulations": {
@@ -34,13 +34,13 @@
   "verifyReal": {
     "status": "paid",
     "paid": "6",
-    "confirmations": 1112,
+    "confirmations": 1700,
     "memoMatched": null,
     "block": 16360722
   },
   "verifyTooHigh": {
-    "status": "unavailable",
-    "message": "The network did not answer. Try again in a moment."
+    "status": "mismatch",
+    "message": "MUSD received by the recipient in this transaction is 6, expected 6.000000000000000001."
   },
   "verifyWrongRecipient": {
     "status": "mismatch",
@@ -57,14 +57,14 @@
   "borrowTestnet": {
     "terms": {
       "chainId": 31611,
-      "price": "80225908480000000000000",
+      "price": "80677353570000000000000",
       "mcr": "1100000000000000000",
       "ccr": "1500000000000000000",
       "minNetDebt": "1800000000000000000000",
       "gasCompensation": "200000000000000000000",
       "borrowingRate": "1000000000000000",
       "interestRateBps": 100,
-      "tcr": "2881842135126692283",
+      "tcr": "2898056527274738789",
       "recoveryMode": false,
       "troves": 330
     },
@@ -75,9 +75,9 @@
       "gasCompensation": "200000000000000000000",
       "totalDebt": "2001800000000000000000",
       "ratio": "2000000000000000000",
-      "collateral": "49904078069718358",
-      "minCollateral": "27447242938345097",
-      "liquidationPrice": "44124249663999999467856",
+      "collateral": "49624830548342936",
+      "minCollateral": "27293656801588615",
+      "liquidationPrice": "44372544463499999719774",
       "yearlyInterest": "18018000000000000000",
       "notes": [
         "The protocol minimum is 1800 MUSD, so the trove mints 1775 MUSD more than the link asks for. You keep the rest.",
@@ -88,14 +88,14 @@
   "borrowMainnet": {
     "terms": {
       "chainId": 31612,
-      "price": "80232000000000000000000",
+      "price": "80680283650000000000000",
       "mcr": "1100000000000000000",
       "ccr": "1500000000000000000",
       "minNetDebt": "1800000000000000000000",
       "gasCompensation": "200000000000000000000",
       "borrowingRate": "1000000000000000",
       "interestRateBps": 100,
-      "tcr": "91860390015089227333",
+      "tcr": "92373574165665871618",
       "recoveryMode": false,
       "troves": 1
     },
@@ -106,9 +106,9 @@
       "gasCompensation": "200000000000000000000",
       "totalDebt": "2001800000000000000000",
       "ratio": "2000000000000000000",
-      "collateral": "49900289161431848",
-      "minCollateral": "27445159038787517",
-      "liquidationPrice": "44127599999999999683272",
+      "collateral": "49623028314675491",
+      "minCollateral": "27292665573071520",
+      "liquidationPrice": "44374156007499999206605",
       "yearlyInterest": "18018000000000000000",
       "notes": [
         "The protocol minimum is 1800 MUSD, so the trove mints 1775 MUSD more than the link asks for. You keep the rest.",
@@ -118,14 +118,14 @@
   },
   "openTroveSimulation": {
     "borrow": "1800000000000000000000",
-    "collateral": "49904657523257206",
+    "collateral": "49629720128118451",
     "to": "0xCdF7028ceAB81fA0C6971208e83fa7872994beE5",
     "result": "ok 0x"
   },
   "inbox": {
     "status": "ok",
-    "fromBlock": 16341840,
-    "head": 16361840,
+    "fromBlock": 16342426,
+    "head": 16362426,
     "payments": 17,
     "withReference": 0,
     "newest": "0x14e9d6337af2f99c7c0ac1930edc6cbcd1b5cb9e0dcc4fa19f5ffe07c8939e0a"

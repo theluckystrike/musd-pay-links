@@ -12,15 +12,16 @@ At phone width (390 px) the page has no horizontal scroll, see [docs/demo-mobile
 
 ## What changed on 25 October 2026
 
-- Borrow quote from the live MUSD protocol. A payer who is short of MUSD sees the BTC to lock, the fee, the protocol minimum and the liquidation price, read from four MUSD protocol contracts.
-- Merchant inbox. The page watches the MUSD contract for a payment that carries the invoice reference. The payer does not need to send a hash.
-- Replay protection. Every invoice is stamped with its creation block, and an older payment is refused.
-- Pay page and Telegram share. A merchant sends one URL in a chat. It opens a payer view with the guard already run.
-- Reliability. Testnet now has a second RPC endpoint, mainnet moved off an endpoint that refused `eth_call`, and reads retry up to 6 times.
-- Chain routes send no CORS header and are rate limited per client.
+- Borrow quote from the live MUSD protocol. A payer who is short of MUSD sees the BTC to lock, the fee, the protocol minimum and the liquidation price, read from four MUSD protocol contracts, with a link to the borrow page of the Mezo app.
+- Invoices on the Worker (Cloudflare KV). Unique references, a block stamp set by the Worker, a pay page per invoice, a list per merchant address, and one transaction pays one invoice.
+- The invoice check finds the payment on chain by its reference. The payer does not need to send a hash. Payments without a reference show as possible matches.
+- Replay protection by invoice block and an exact reference match.
+- Pay page and Telegram share.
+- Reliability. Batched RPC reads, a second testnet endpoint, mainnet moved off an endpoint that refused `eth_call`, and reads retry up to 6 times. `/api/health` now probes both chains.
+- Chain routes send no CORS header and have an exact per-client limit in a Durable Object. HTTP codes follow the answer.
+- The payer picks the networks they accept. The demo defaults to Mezo Testnet only.
 - A scripted path from test BTC to a paid invoice (`testnet-borrow` and `testnet-pay`).
-- Invoice list in the browser, possible-match hints when a wallet drops the reference, and a network choice for the payer.
-- Tests went from 204 to 244.
+- Tests went from 204 to 261.
 
 ## What it does
 
@@ -30,10 +31,10 @@ MUSD Pay Links has five parts.
 
 1. The merchant side creates a standard EIP-681 link and a QR code for MUSD on Mezo, with the amount, the recipient and an optional reference such as an invoice number.
 2. The payer side is a TypeScript library (and the same code in the demo page) that parses the link and refuses it unless three checks pass. The token must be the real MUSD contract for that chain id. The recipient must be a valid address with a correct EIP-55 checksum, and on the payer's allowlist when one is set. The amount must be within the payer's limit, compared with exact integer math at 18 decimals. Every refusal comes with a code and a plain reason.
-3. The merchant can then confirm the payment on chain. The verifier reads the receipt and counts only Transfer events emitted by the real MUSD contract to the merchant's address. When the link carried a reference, the verifier also requires the payment input to end with the same reference. A payment that does not carry it is refused. The page gives every invoice a fresh random reference (about 40 bits) and warns when a reference is reused for the same address, so one payment matches one invoice. With a reused reference, one payment could match both invoices.
+3. The merchant can then confirm the payment on chain. The verifier reads the receipt and counts only Transfer events emitted by the real MUSD contract to the merchant's address. When the link carried a reference, the verifier also requires the payment input to end with the same reference. A payment that does not carry it is refused. The reference must match exactly, so `XINV-1` does not pay `INV-1`. The Worker gives every invoice a fresh random reference (about 40 bits), refuses a reference that is already taken on that chain with HTTP 409, and records each transaction that paid an invoice, so one payment pays one invoice.
 
-4. A payer who is short of MUSD sees how much BTC would mint it. The borrow quote reads the live rules of the MUSD protocol on Mezo (the BTC price from PriceFeed, MCR, CCR, the minimum debt, the gas compensation and the fee from BorrowerOperations, the interest rate from InterestRateManager, the system ratio and recovery mode from TroveManager). It gives the BTC to lock, the debt, the liquidation price and a hand-off to the Mezo app. The payer keeps the Bitcoin and spends MUSD.
-5. The merchant can watch for the payment without a hash from the payer. The inbox reads MUSD Transfer logs to the merchant address since the block in which the invoice was created, decodes the reference from each payment, and marks the invoice paid with the oldest payment that carries its reference and covers the amount. A payment of exactly the amount without a reference is shown as a possible match for a person to confirm, because some wallets drop the reference. The inbox looks back at most 20,000 blocks (about 23 hours on testnet) and says so when an invoice is older. It sends its log queries and transaction reads as JSON-RPC batches, so one inbox call uses a handful of requests. The page keeps a list of the invoices it created in the browser (localStorage, up to 20) with a Check button each.
+4. A payer who is short of MUSD sees how much BTC would mint it. The borrow quote links to the borrow page of the Mezo testnet dApp (https://testnet.mezo.org/borrow, the testnet dApp named on the buildathon page) or of https://mezo.org/borrow. The quote reads the live rules of the MUSD protocol on Mezo (the BTC price from PriceFeed, MCR, CCR, the minimum debt, the gas compensation and the fee from BorrowerOperations, the interest rate from InterestRateManager, the system ratio and recovery mode from TroveManager). It gives the BTC to lock, the debt, the liquidation price and a hand-off to the Mezo app. The payer keeps the Bitcoin and spends MUSD.
+5. The merchant keeps invoices on the Worker. `POST /api/invoices` saves an invoice in Cloudflare KV with a unique reference and the current block, read by the Worker, not by the browser. The invoice works on any device and has its own pay page (`/?invoice=INV-...&chain=31611`). Checking an invoice reads MUSD Transfer logs to the merchant address since that block, decodes the reference of each payment, and marks the invoice paid with the oldest payment that carries the reference and covers the amount. The payer does not need to send a hash. A payment of exactly the amount without a reference shows as a possible match for a person to confirm, because some wallets drop the reference. The search looks back at most 20,000 blocks (about 23 hours on testnet) and says so when an invoice is older, and it reads at most the newest 50 payments. Log queries and transaction reads go out as JSON-RPC batches, so one check uses a handful of requests. Invoices expire after 30 days. The store holds only data that is public on chain anyway.
 
 The library never holds a key and never signs. It returns an unsigned transaction (`to` is the MUSD contract, `value` is 0, `data` is `transfer(recipient, amount)`) for the wallet or agent to sign.
 
@@ -107,11 +108,17 @@ The same functions are exposed as a read-only JSON API by the Worker, so an agen
 | `/api/verify?chain=31611&tx=0x...&to=0x...&amount=12.5&memo=INV-1&from_block=16360000` | Confirm a payment on chain. A payment mined before `from_block` is refused |
 | `/api/payments?chain=31611&to=0x...&memo=INV-1&amount=12.5&from_block=16360000` | Merchant inbox. Lists MUSD payments to the address with their references, and `paid` when one matches |
 | `/api/borrow?chain=31611&need=25&ratio=200` | Borrow quote from the live MUSD protocol |
-| `/api/head?chain=31611` | Current block, to stamp an invoice |
+| `/api/head?chain=31611` | Current block |
+| `POST /api/invoices` with `{"chain":31611,"to":"0x...","amount":"12.5"}` | Save an invoice. Returns the reference, the block, the link, the QR code and the pay page URL. 409 when a given reference is taken |
+| `/api/invoices/INV-...?chain=31611` | Check one invoice on chain and record the payment. `&check=0` reads the stored invoice only |
+| `/api/invoices?chain=31611&to=0x...` | The 20 newest invoices of a merchant address |
+| `/api/health` | Reads the block number on both chains and answers 503 when one RPC does not answer |
 | `/api/token?chain=all` | Read the MUSD contracts live |
 | `/api/balance?chain=31611&address=0x...` | Read a MUSD balance |
 
-The routes that only compute (`/api/health`, `/api/link`, `/api/check`) can be called from any web page. The routes that read the chain send no CORS header, so other web pages cannot use the Worker as an RPC proxy, and they are limited to 30 calls a minute per client IP with the Cloudflare rate limiting binding. A server-side agent can call every route.
+HTTP codes follow the answer, so an agent can branch on the code alone. 200 for `paid`, `pending` and `open`, 404 for `not_found`, 422 for `mismatch` and `failed`, 503 for `unavailable`.
+
+The routes that only compute (`/api/link`, `/api/check`) can be called from any web page. The routes that read the chain send no CORS header, so other web pages cannot use the Worker as an RPC proxy. They are limited to 30 calls a minute per client IP, and invoice creation to 10 a minute. The count is kept in a Durable Object per client, so it is exact across Worker isolates. In a live test on 25 October 2026, call 31 in one minute was the first to get 429. The Cloudflare rate limiting binding alone had let 40 calls through, so it is only a second line. A server-side agent can call every route.
 
 ## Threat model
 
@@ -119,7 +126,7 @@ The attacker controls the link text. They may also control the page or message t
 
 | Attack | What the guard does | Code |
 |---|---|---|
-| Fake token with the same symbol | Token address must equal the MUSD contract for the link's chain id | `not_musd` |
+| Fake token with the same symbol | Token address must equal the MUSD contract for the link's chain id. The comparison ignores case, so an all-lowercase MUSD address from a normal EIP-681 generator is accepted, and a mixed-case address with a wrong checksum is refused | `not_musd`, `token_bad_checksum` |
 | Lookalike token address that keeps the first and last characters | Refused with a message that names the lookalike | `lookalike_token` |
 | Real MUSD address with the other Mezo chain id | Refused, so funds do not land on the wrong network | `token_chain_mismatch` |
 | Missing chain id, so the wallet guesses the network | Refused | `missing_chain_id` |
@@ -138,7 +145,8 @@ The attacker controls the link text. They may also control the page or message t
 | `approve`, `transferFrom`, `increaseAllowance`, `permit` | Refused, only `transfer` is allowed | `dangerous_function` |
 | Very long links, fragments, malformed queries, ENS names | Refused | `too_long`, `fragment`, `malformed_query`, `ens_or_bad_target` |
 | Replay of an older payment under a new invoice reference | The verifier requires the payment input to carry the link's reference, otherwise `mismatch` | `mismatch` |
-| Replay of an older payment with no reference | The merchant stamps the invoice with its creation block. A payment mined earlier is refused, and the inbox does not search before it | `mismatch` |
+| Replay of an older payment with no reference | The Worker stamps the invoice with its creation block. A payment mined earlier is refused, and the invoice check does not search before it | `mismatch` |
+| One payment used for two invoices | References are unique per chain (409 on reuse), the match is exact, and a transaction that paid one invoice is recorded and skipped for every other | `reference_taken` |
 | A payer's page accepts a link for the other Mezo network | The payer picks the networks they accept. The demo defaults to Mezo Testnet only | `wrong_chain` |
 
 Out of scope. The guard does not judge whether the merchant is honest, and it does not replace the wallet's own confirmation screen. It does not check sanctions lists. A payer who sets a high limit and no allowlist can still pay a real but unwanted address. The verifier trusts the RPC node it reads from (the Worker uses the public Mezo RPC endpoints listed above).
@@ -198,16 +206,17 @@ Run on 25 October 2026 with `LIVE=1 pnpm test`.
  ✓ test/amount.test.ts    52 tests
  ✓ test/borrow.test.ts    13 tests (2 live)
  ✓ test/guard.test.ts     93 tests
+ ✓ test/invoices.test.ts  13 tests
  ✓ test/merchant.test.ts  15 tests
- ✓ test/rpc.test.ts       37 tests (4 live)
- ✓ test/worker.test.ts    14 tests
- Test Files  7 passed (7)
-      Tests  244 passed (244)
+ ✓ test/rpc.test.ts       39 tests (4 live)
+ ✓ test/worker.test.ts    16 tests
+ Test Files  8 passed (8)
+      Tests  261 passed (261)
 ```
 
-Without network, `pnpm test` gives 238 passed and 6 skipped.
+Without network, `pnpm test` gives 255 passed and 6 skipped.
 
-The guard suite covers wrong chains, lookalike tokens, uint256 overflow and wraparound, bad checksums, eleven unicode tricks, percent-encoding, extra and duplicated parameters, dangerous functions, and 2,000 random inputs that must never throw. The merchant suite creates 300 links with pseudo-random amounts and checks that each one passes the guard with the same amount. The verifier suite uses fake RPCs that answer null, fail, or lag on the first endpoint, and checks that a payment without the reference or from before the invoice block is refused. The inbox suite checks chunked log queries (at most 5,000 blocks a range, at most 20,000 blocks back), batching (60 payments in at most 3 requests), the oldest-payment rule, possible matches, lagging nodes, reference decoding, sums inside one transaction and the amount rule. The borrow suite checks the minimum debt, the fee, rounding up of the BTC, the liquidation price, and the MCR and recovery mode floors. The worker suite checks CORS and the rate limit. `pnpm typecheck` passes and `pnpm audit --prod` reports no known vulnerabilities.
+The guard suite covers wrong chains, lookalike tokens, uint256 overflow and wraparound, bad checksums, eleven unicode tricks, percent-encoding, extra and duplicated parameters, dangerous functions, and 2,000 random inputs that must never throw. The merchant suite creates 300 links with pseudo-random amounts and checks that each one passes the guard with the same amount. The verifier suite uses fake RPCs that answer null, fail, or lag on the first endpoint, and checks that a payment without the reference or from before the invoice block is refused. The inbox suite checks chunked log queries (at most 5,000 blocks a range, at most 20,000 blocks back), batching (60 payments in at most 3 requests), the oldest-payment rule, possible matches, lagging nodes, reference decoding, sums inside one transaction and the amount rule. The borrow suite checks the minimum debt, the fee, rounding up of the BTC, the liquidation price, and the MCR and recovery mode floors. The invoice suite checks unique references, the block stamp, the oldest-payment rule, one transaction for one invoice and possible matches. The worker suite checks CORS, both limiters and the HTTP codes. `pnpm typecheck` passes and `pnpm audit --prod` reports no known vulnerabilities.
 
 ## Project layout
 
@@ -219,6 +228,7 @@ The guard suite covers wrong chains, lookalike tokens, uint256 overflow and wrap
 | `src/merchant.ts` | Link creation with a round trip through the guard |
 | `src/rpc.ts` | Live contract reads with retries and a fallback endpoint, payment verification and the merchant inbox |
 | `src/borrow.ts` | Live MUSD protocol terms and the borrow quote |
+| `src/invoices.ts` | Invoices in Cloudflare KV, matched to payments on chain |
 | `src/worker.ts` | Cloudflare Worker API |
 | `web/` | Demo page |
 | `scripts/` | Evidence, testnet borrow and testnet payment scripts |

@@ -83,67 +83,50 @@ function runCheck(): void {
   $<HTMLButtonElement>("p-pay").title = eth ? "" : "No browser wallet found";
 }
 
-/** A fresh invoice reference, so every link can be matched to exactly one payment. */
-function newMemo(): string {
-  const A = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  const bytes = crypto.getRandomValues(new Uint8Array(8));
-  return "INV-" + [...bytes].map((b) => A[b % A.length]).join(""); // about 40 bits, unique per invoice
+// Invoices live in the Worker's KV store, so they survive a reload and work on another device.
+interface ServerInvoice {
+  chainId: number; to: string; amount: string; units: string; memo: string; fromBlock: number; createdAt: string; link: string;
+  payUrl: string; explorer: string | null; paid?: { txHash: string; block: number; from: string; amount: string };
+}
+interface InvoiceAnswer { status: string; invoice?: ServerInvoice; possible?: InboxPayment[]; clamped?: boolean; head?: number; message?: string; error?: string; reasons?: { code: string; message: string }[] }
+interface InboxPayment { txHash: string; block: number; from: string; amount: string; memo: string | null; possible?: boolean }
+
+let memoEdited = false;
+
+async function loadInvoices(): Promise<void> {
+  const box = $("m-list");
+  const chain = $<HTMLSelectElement>("m-chain").value;
+  const to = $("m-to").value.trim();
+  try {
+    const res = await fetch(`/api/invoices?chain=${chain}&to=${encodeURIComponent(to)}`);
+    const v = (await res.json()) as { invoices?: ServerInvoice[]; error?: string };
+    if (!v.invoices) throw new Error(v.error ?? `HTTP ${res.status}`);
+    if (v.invoices.length === 0) {
+      box.innerHTML = `<div class="muted">No invoices for this address yet.</div>`;
+      return;
+    }
+    box.innerHTML = `<table class="inv"><thead><tr><th>Reference</th><th>MUSD</th><th>Status</th><th></th></tr></thead><tbody>${v.invoices
+      .map((x, i) => `<tr><td class="mono-cell"><a href="${esc(x.payUrl)}" target="_blank" rel="noopener">${esc(x.memo)}</a></td><td>${esc(x.amount)}</td><td id="inv-st-${i}">${x.paid && x.explorer ? `<a href="${esc(x.explorer)}" target="_blank" rel="noopener">paid</a>` : "open"}</td><td>${x.paid ? "" : `<button class="ghost small" data-memo="${esc(x.memo)}" data-i="${i}">Check</button>`}</td></tr>`)
+      .join("")}</tbody></table>`;
+    box.querySelectorAll<HTMLButtonElement>("button[data-memo]").forEach((b) => {
+      b.onclick = async () => {
+        const cell = $(`inv-st-${b.dataset.i}`);
+        cell.textContent = "checking...";
+        const a = await fetchInvoice(Number(chain), b.dataset.memo!, true);
+        cell.innerHTML = a.status === "paid" && a.invoice?.explorer ? `<a href="${esc(a.invoice.explorer)}" target="_blank" rel="noopener">paid</a>` : esc(a.status === "open" ? (a.possible?.length ? "open, possible match" : "open") : (a.message ?? a.error ?? a.status));
+      };
+    });
+  } catch (e) {
+    box.innerHTML = `<div class="muted">Could not load the invoices (${esc((e as Error).message)}).</div>`;
+  }
 }
 
-// Invoices this browser created. Kept in localStorage as a convenience only. The chain is the record.
-interface Invoice { chainId: number; to: string; amount: string; memo: string; block: number | null; at: string; paidTx?: string }
-const STORE = "musd-pay-links.invoices.v1";
-function loadInvoices(): Invoice[] {
+async function fetchInvoice(chainId: number, memo: string, check: boolean): Promise<InvoiceAnswer> {
   try {
-    const v = JSON.parse(localStorage.getItem(STORE) ?? "[]") as Invoice[];
-    return Array.isArray(v) ? v.slice(0, 20) : [];
+    const res = await fetch(`/api/invoices/${encodeURIComponent(memo)}?chain=${chainId}${check ? "" : "&check=0"}`);
+    return (await res.json()) as InvoiceAnswer;
   } catch {
-    return [];
-  }
-}
-function saveInvoices(list: Invoice[]): void {
-  try {
-    localStorage.setItem(STORE, JSON.stringify(list.slice(0, 20)));
-  } catch {
-    /* storage blocked, the page still works */
-  }
-}
-function upsertInvoice(inv: Invoice): void {
-  const list = loadInvoices().filter((x) => !(x.memo === inv.memo && x.to === inv.to && x.chainId === inv.chainId));
-  saveInvoices([inv, ...list]);
-  renderInvoices();
-}
-function renderInvoices(): void {
-  const list = loadInvoices();
-  const box = $("m-list");
-  if (list.length === 0) {
-    box.innerHTML = `<div class="muted">No invoices in this browser yet.</div>`;
-    return;
-  }
-  box.innerHTML = `<table class="inv"><thead><tr><th>Reference</th><th>MUSD</th><th>Network</th><th>Status</th><th></th></tr></thead><tbody>${list
-    .map((x, i) => {
-      const c = chainById(x.chainId);
-      const st = x.paidTx ? `<a href="${c?.explorer}/tx/${esc(x.paidTx)}" target="_blank" rel="noopener">paid</a>` : "open";
-      return `<tr><td class="mono-cell">${esc(x.memo)}</td><td>${esc(x.amount)}</td><td>${c?.testnet ? "Testnet" : "Mainnet"}</td><td id="inv-st-${i}">${st}</td><td><button class="ghost small" data-inv="${i}">Check</button></td></tr>`;
-    })
-    .join("")}</tbody></table>`;
-  box.querySelectorAll<HTMLButtonElement>("button[data-inv]").forEach((b) => {
-    b.onclick = () => void checkInvoice(Number(b.dataset.inv));
-  });
-}
-async function checkInvoice(i: number): Promise<void> {
-  const inv = loadInvoices()[i];
-  if (!inv) return;
-  const cell = $(`inv-st-${i}`);
-  cell.textContent = "checking...";
-  const q = new URLSearchParams({ chain: String(inv.chainId), to: inv.to, amount: inv.amount, memo: inv.memo, from_block: inv.block === null ? "" : String(inv.block) });
-  try {
-    const v = (await (await fetch(`/api/payments?${q}`)).json()) as InboxAnswer;
-    if (v.status !== "ok") throw new Error(v.error ?? v.message ?? "unavailable");
-    if (v.paid) upsertInvoice({ ...inv, paidTx: v.paid.txHash });
-    else cell.textContent = v.clamped ? "open (older than about 23 h, check by hash)" : "open";
-  } catch (e) {
-    cell.textContent = `not checked (${(e as Error).message})`;
+    return { status: "unavailable", message: "The network did not answer." };
   }
 }
 
@@ -156,104 +139,102 @@ async function headBlock(chainId: number): Promise<number | null> {
   }
 }
 
-function payPageUrl(link: string): string {
-  return `${location.origin}/?pay=${encodeURIComponent(link)}`;
-}
-
 let watchTimer: number | null = null;
 
 async function runCreate(fillVerify = true): Promise<void> {
-  if (!$("m-memo").value.trim()) $("m-memo").value = newMemo();
+  if (fillVerify && !memoEdited) $("m-memo").value = "";
   const chainId = Number($<HTMLSelectElement>("m-chain").value);
-  const reused = loadInvoices().some((x) => x.memo === $("m-memo").value.trim() && x.to.toLowerCase() === $("m-to").value.trim().toLowerCase());
-  const r = createPaymentLink({ chainId, recipient: $("m-to").value, amount: $("m-amount").value, memo: $("m-memo").value });
-  if (!r.ok) {
-    $("m-out").innerHTML = renderVerdict(r);
+  const local = createPaymentLink({ chainId, recipient: $("m-to").value, amount: $("m-amount").value, memo: $("m-memo").value || "INV-PREVIEW" });
+  if (!local.ok) {
+    $("m-out").innerHTML = renderVerdict(local);
     return;
   }
-  const page = payPageUrl(r.link);
-  const tg = `https://t.me/share/url?url=${encodeURIComponent(page)}&text=${encodeURIComponent(`Please pay ${r.payment.amountText} MUSD on ${r.payment.chainName}, reference ${r.payment.memo}`)}`;
-  $("m-out").innerHTML = `<div class="muted">EIP-681 link</div><div class="mono" id="m-link">${esc(r.link)}</div>
-    <div class="qr" role="img" aria-label="QR code of the payment link">${qrSvg(r.link)}</div>
-    <div class="muted" style="margin-top:10px">Pay page to send in a chat</div><div class="mono">${esc(page)}</div>
+  if (!fillVerify) {
+    // First paint: show a preview without writing an invoice.
+    $("m-out").innerHTML = `<div class="muted">Press "Create invoice" to save an invoice with a fresh reference and get its pay page.</div>
+      <div class="qr" role="img" aria-label="QR code preview">${qrSvg(local.link)}</div>`;
+    return;
+  }
+  $("m-out").innerHTML = `<div class="muted">Saving the invoice and stamping it with the current block...</div>`;
+  let a: InvoiceAnswer & { ok?: boolean; qrSvg?: string };
+  try {
+    const res = await fetch("/api/invoices", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chain: chainId, to: $("m-to").value.trim(), amount: $("m-amount").value.trim(), memo: memoEdited ? $("m-memo").value.trim() : null }),
+    });
+    a = (await res.json()) as typeof a;
+  } catch {
+    a = { status: "unavailable", error: "The network did not answer." };
+  }
+  if (!a.ok || !a.invoice) {
+    const reasons = a.reasons ?? [{ code: "unavailable", message: a.error ?? a.message ?? "The invoice was not saved." }];
+    $("m-out").innerHTML = renderVerdict({ ok: false, reasons });
+    return;
+  }
+  const inv = a.invoice;
+  memoEdited = false;
+  $("m-memo").value = inv.memo;
+  const tg = `https://t.me/share/url?url=${encodeURIComponent(inv.payUrl)}&text=${encodeURIComponent(`Please pay ${inv.amount} MUSD on ${chainById(chainId)!.name}, invoice ${inv.memo}`)}`;
+  $("m-out").innerHTML = `<div class="verdict ok"><strong>Invoice ${esc(inv.memo)} saved. Stamped at block ${inv.fromBlock.toLocaleString("en-US")}.</strong> Payments mined before it do not count, and this reference is unique on ${esc(chainById(chainId)!.name)}.</div>
+    <div class="muted" style="margin-top:10px">EIP-681 link</div><div class="mono">${esc(inv.link)}</div>
+    <div class="qr" role="img" aria-label="QR code of the payment link">${a.qrSvg ?? qrSvg(inv.link)}</div>
+    <div class="muted" style="margin-top:10px">Pay page to send in a chat</div><div class="mono">${esc(inv.payUrl)}</div>
     <div class="actions"><button class="ghost" id="m-copy">Copy link</button><button class="ghost" id="m-copy-page">Copy pay page</button>
     <a class="button ghost" href="${esc(tg)}" target="_blank" rel="noopener">Share in Telegram</a>
     <button class="ghost" id="m-send">Check it as the payer</button></div>
     <div class="actions"><button id="m-watch">Watch for this payment</button></div>
-    ${reused ? `<div class="verdict bad" style="margin-top:10px"><strong>You already used this reference for this address. One payment could then match two invoices. Press "New invoice" for a fresh reference.</strong></div>` : ""}
-    <div class="out" id="m-watch-out" aria-live="polite"><div class="muted">Stamping the invoice with the current block...</div></div>`;
-  $("m-copy").onclick = () => navigator.clipboard?.writeText(r.link);
-  $("m-copy-page").onclick = () => navigator.clipboard?.writeText(page);
+    <div class="out" id="m-watch-out" aria-live="polite"></div>`;
+  $("m-copy").onclick = () => navigator.clipboard?.writeText(inv.link);
+  $("m-copy-page").onclick = () => navigator.clipboard?.writeText(inv.payUrl);
   $("m-send").onclick = () => {
     $<HTMLSelectElement>("p-net").value = String(chainId);
-    $<HTMLTextAreaElement>("p-link").value = r.link;
+    $<HTMLTextAreaElement>("p-link").value = inv.link;
     runCheck();
     $("p-h").scrollIntoView({ behavior: "smooth" });
   };
-  const block = await headBlock(chainId);
-  const stamp = block === null ? "The block could not be read, so older payments are not excluded." : `Invoice created at block ${block.toLocaleString("en-US")}. Payments mined before it do not count.`;
-  $("m-watch-out").innerHTML = `<div class="muted">${esc(stamp)}</div>`;
-  if (fillVerify && !reused) upsertInvoice({ chainId, to: r.payment.recipient, amount: r.payment.amountText, memo: r.payment.memo ?? "", block, at: new Date().toISOString() });
-  $("m-watch").onclick = () => void watchPayment(chainId, r.payment.recipient, r.payment.amountText, r.payment.memo ?? "", block);
-  if (!fillVerify) return;
+  $("m-watch").onclick = () => void watchInvoice(chainId, inv.memo);
   // Fill the confirm panel with this invoice, so the merchant can also check a hash by hand.
   $<HTMLSelectElement>("v-chain").value = String(chainId);
-  $("v-to").value = r.payment.recipient;
-  $("v-amount").value = r.payment.amountText;
-  $("v-memo").value = r.payment.memo ?? "";
-  $("v-from").value = block === null ? "" : String(block);
+  $("v-to").value = inv.to;
+  $("v-amount").value = inv.amount;
+  $("v-memo").value = inv.memo;
+  $("v-from").value = String(inv.fromBlock);
   $("v-tx").value = "";
+  void loadInvoices();
 }
 
-function renderInbox(v: InboxAnswer, chainId: number): string {
-  const c = chainById(chainId)!;
-  if (v.paid) {
-    return `<div class="verdict ok"><strong>Paid. ${esc(v.paid.amount)} MUSD with reference ${esc(String(v.paid.memo))}.</strong>
-      <dl class="kv"><dt>From</dt><dd>${esc(v.paid.from)}</dd><dt>Block</dt><dd>${v.paid.block}</dd>
-      <dt>Transaction</dt><dd><a href="${c.explorer}/tx/${esc(v.paid.txHash)}" target="_blank" rel="noopener">${esc(v.paid.txHash)}</a></dd></dl></div>`;
+function renderInvoiceAnswer(a: InvoiceAnswer): string {
+  const inv = a.invoice;
+  if (a.status === "paid" && inv?.paid) {
+    return `<div class="verdict ok"><strong>Paid. ${esc(inv.paid.amount)} MUSD with reference ${esc(inv.memo)}.</strong>
+      <dl class="kv"><dt>From</dt><dd>${esc(inv.paid.from)}</dd><dt>Block</dt><dd>${inv.paid.block}</dd>
+      <dt>Transaction</dt><dd><a href="${esc(inv.explorer ?? "")}" target="_blank" rel="noopener">${esc(inv.paid.txHash)}</a></dd></dl></div>`;
   }
-  const rows = v.payments
-    .slice(0, 5)
-    .map((p) => `<li><a href="${c.explorer}/tx/${esc(p.txHash)}" target="_blank" rel="noopener">${esc(p.txHash.slice(0, 12))}...</a> ${esc(p.amount)} MUSD, reference ${p.memo ? esc(p.memo) : "none"}</li>`)
-    .join("");
-  const possible = v.payments.filter((p) => p.possible);
+  if (a.status !== "open") return `<div class="muted">${esc(a.message ?? a.error ?? a.status)} Trying again.</div>`;
+  const possible = a.possible ?? [];
   const maybe = possible.length
     ? `<div class="verdict bad" style="margin-top:8px"><strong>Possible match. ${possible.length} payment(s) of exactly this amount arrived without a reference.</strong> Some wallets drop the reference. Ask the payer which one is theirs, then confirm it by hash in panel 3.</div>`
     : "";
-  const warn = [
-    v.clamped ? "The invoice is older than the inbox window (about 23 hours), so earlier blocks were not searched. Confirm by hash in panel 3." : "",
-    v.truncated ? "This address receives many payments. Only the newest 50 were read." : "",
-  ].filter(Boolean).map((w) => `<div class="note">${esc(w)}</div>`).join("");
-  return `<div class="muted">No payment with this reference yet. Searched blocks ${v.fromBlock.toLocaleString("en-US")} to ${v.head.toLocaleString("en-US")}.</div>${maybe}${warn}${rows ? `<div class="muted" style="margin-top:6px">Other MUSD payments to this address</div><ul class="muted">${rows}</ul>` : ""}`;
+  const warn = a.clamped ? `<div class="note">The invoice is older than the inbox window (about 23 hours), so earlier blocks were not searched. Confirm by hash in panel 3.</div>` : "";
+  return `<div class="muted">No payment with reference ${esc(inv?.memo ?? "")} yet. Searched up to block ${(a.head ?? 0).toLocaleString("en-US")}.</div>${maybe}${warn}`;
 }
 
-interface InboxPayment { txHash: string; block: number; from: string; amount: string; memo: string | null; possible?: boolean }
-interface InboxAnswer { status: string; head: number; fromBlock: number; clamped?: boolean; truncated?: boolean; payments: InboxPayment[]; paid: InboxPayment | null; message?: string; error?: string }
-
-async function watchPayment(chainId: number, to: string, amount: string, memo: string, fromBlock: number | null): Promise<void> {
+async function watchInvoice(chainId: number, memo: string): Promise<void> {
   if (watchTimer !== null) clearTimeout(watchTimer);
   const out = $("m-watch-out");
-  const q = new URLSearchParams({ chain: String(chainId), to, amount, memo, from_block: fromBlock === null ? "" : String(fromBlock) });
   const started = Date.now();
+  out.innerHTML = `<div class="muted">Watching the MUSD contract for invoice ${esc(memo)}...</div>`;
   const tick = async () => {
-    let v: InboxAnswer;
-    try {
-      v = (await (await fetch(`/api/payments?${q}`)).json()) as InboxAnswer;
-    } catch {
-      v = { status: "unavailable", head: 0, fromBlock: 0, payments: [], paid: null };
+    const a = await fetchInvoice(chainId, memo, true);
+    out.innerHTML = renderInvoiceAnswer(a);
+    if (a.status === "paid") {
+      void loadInvoices();
+      return;
     }
-    if (v.status === "ok") {
-      out.innerHTML = renderInbox(v, chainId);
-      if (v.paid) {
-        const inv = loadInvoices().find((x) => x.memo === memo && x.to === to && x.chainId === chainId);
-        if (inv) upsertInvoice({ ...inv, paidTx: v.paid.txHash });
-      }
-    }
-    else out.innerHTML = `<div class="muted">${esc(v.message ?? v.error ?? "The network did not answer.")} Trying again.</div>`;
-    if (v.paid || Date.now() - started > 15 * 60_000) return;
+    if (Date.now() - started > 15 * 60_000) return;
     watchTimer = window.setTimeout(() => void tick(), 8000);
   };
-  out.innerHTML = `<div class="muted">Watching the MUSD contract for a transfer to ${esc(to)} with reference ${esc(memo)}...</div>`;
   await tick();
 }
 
@@ -398,7 +379,7 @@ async function runBorrow(): Promise<void> {
         <dt>System</dt><dd>${t.troves} trove${t.troves === 1 ? "" : "s"}, total ratio ${pct(BigInt(t.tcr))}, recovery mode ${t.recoveryMode ? "on" : "off"}</dd>
       </dl>
       <ul class="muted">${k.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>
-      <div class="actions"><a class="button" href="${esc(v.borrowAt)}" target="_blank" rel="noopener">Borrow MUSD in the Mezo app</a></div></div>`;
+      <div class="actions"><a class="button" href="${esc(v.borrowAt)}" target="_blank" rel="noopener">Borrow MUSD in the Mezo app (borrow page)</a></div></div>`;
   } catch (e) {
     out.innerHTML = `<div class="verdict bad"><strong>Could not read the MUSD protocol right now. ${esc((e as Error).message)}</strong></div>`;
   }
@@ -461,29 +442,45 @@ function init(): void {
     chips.appendChild(b);
   }
   $("m-go").onclick = () => void runCreate();
-  $("m-new").onclick = () => {
-    $("m-memo").value = newMemo();
-    void runCreate();
-  };
+  $("m-memo").oninput = () => (memoEdited = $("m-memo").value.trim() !== "");
+  $("m-to").onchange = () => void loadInvoices();
+  $("m-chain").onchange = () => void loadInvoices();
   $("p-go").onclick = runCheck;
   $("p-pay").onclick = () => void payWithWallet();
   $("p-can").onclick = () => void runCanPay();
   $("v-go").onclick = () => void runVerify();
   $("b-go").onclick = () => void runBorrow();
-  $("m-memo").value = newMemo();
   $("p-net").onchange = runCheck;
-  renderInvoices();
-  const shared = new URLSearchParams(location.search).get("pay");
-  if (shared) {
-    $<HTMLTextAreaElement>("p-link").value = shared;
+  void loadInvoices();
+  const qs = new URLSearchParams(location.search);
+  const shared = qs.get("pay");
+  const invoiceRef = qs.get("invoice");
+  if (shared || invoiceRef) {
     $("pay-banner").hidden = false;
     $("m-panel").hidden = true;
     $("steps").hidden = true;
-    runCheck();
+    if (shared) {
+      $<HTMLTextAreaElement>("p-link").value = shared;
+      runCheck();
+    } else {
+      const chainId = Number(qs.get("chain") ?? "31611");
+      void fetchInvoice(chainId, invoiceRef!, false).then((a) => {
+        if (!a.invoice) {
+          $("pay-banner").innerHTML = `<strong>${esc(a.error ?? "This invoice was not found.")}</strong>`;
+          return;
+        }
+        $("pay-banner").innerHTML = a.status === "paid"
+          ? `<strong>Invoice ${esc(a.invoice.memo)} is already paid.</strong> Do not pay it again.`
+          : `<strong>Invoice ${esc(a.invoice.memo)}. ${esc(a.invoice.amount)} MUSD on ${esc(chainById(chainId)?.name ?? "")}.</strong> The guard below checked the link in your browser. Set your limit, then pay from your wallet or check your balance first.`;
+        $<HTMLSelectElement>("p-net").value = String(chainId);
+        $<HTMLTextAreaElement>("p-link").value = a.invoice.link;
+        runCheck();
+      });
+    }
     $("p-h").scrollIntoView();
   } else {
     void runCreate(false);
-    const first = createPaymentLink({ chainId: 31611, recipient: SHOP, amount: "12.50", memo: $("m-memo").value });
+    const first = createPaymentLink({ chainId: 31611, recipient: SHOP, amount: "12.50", memo: "INV-1042" });
     if (first.ok) $<HTMLTextAreaElement>("p-link").value = first.link;
     runCheck();
   }

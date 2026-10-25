@@ -8,16 +8,49 @@ import { checkPaymentLink } from "./guard.ts";
 import { createPaymentLink } from "./merchant.ts";
 import { qrSvg } from "./qr.ts";
 import { quoteBorrow, readBorrowTerms, type BorrowTerms } from "./borrow.ts";
-import { findPayments, headBlock, readBalance, readTokenInfo, verifyPayment, type TokenInfo } from "./rpc.ts";
+import { checkInvoice, createInvoice, getInvoice, listInvoices, type KV, type StoredInvoice } from "./invoices.ts";
+import { MEMO_PATTERN } from "./eip681.ts";
+import { findPayments, headBlock, readBalance, readTokenInfo, rpc, verifyPayment, type TokenInfo } from "./rpc.ts";
 
 interface RateLimiter {
   limit(opts: { key: string }): Promise<{ success: boolean }>;
+}
+
+interface DONamespace {
+  idFromName(name: string): unknown;
+  get(id: unknown): { fetch(req: Request): Promise<Response> };
+}
+
+/**
+ * One Durable Object per client key counts calls in a fixed window. A Durable Object is a single instance,
+ * so the count is exact across all Worker isolates. The Cloudflare rate limiting binding did not refuse
+ * 40 calls in 10 seconds in a live test on 25 October 2026, so this is the limit that is enforced.
+ */
+export class ClientLimiter {
+  private start = 0;
+  private count = 0;
+  async fetch(req: Request): Promise<Response> {
+    const u = new URL(req.url);
+    const limit = Number(u.searchParams.get("limit") ?? RATE_LIMIT.limit);
+    const period = Number(u.searchParams.get("period") ?? RATE_LIMIT.periodSeconds) * 1000;
+    const now = Date.now();
+    if (now - this.start >= period) {
+      this.start = now;
+      this.count = 0;
+    }
+    this.count++;
+    return new Response(this.count <= limit ? "ok" : "over", { status: this.count <= limit ? 200 : 429 });
+  }
 }
 
 interface Env {
   ASSETS: { fetch(req: Request): Promise<Response> };
   /** Cloudflare Workers rate limiting binding, see wrangler.toml. Optional so tests and dev run without it. */
   LIMITER?: RateLimiter;
+  /** Invoice store, see src/invoices.ts. Optional so the read-only routes work without it. */
+  INVOICES?: KV;
+  /** Exact per-client limiter, see ClientLimiter. Optional so tests and dev run without it. */
+  CLIENT_LIMITER?: DONamespace;
 }
 
 const JSON_HEADERS = {
@@ -31,7 +64,9 @@ const JSON_HEADERS = {
  * are same-origin only for browsers and are rate limited per client IP, so the Worker is not an open
  * RPC proxy. Server-side agents can call every route.
  */
-export const PURE_ROUTES = new Set(["/api/health", "/api/link", "/api/check"]);
+export const PURE_ROUTES = new Set(["/api/link", "/api/check"]);
+/** Creating invoices writes to KV, so it has its own, lower limit per client. */
+export const CREATE_LIMIT = { limit: 10, periodSeconds: 60 };
 export const RATE_LIMIT = { limit: 30, periodSeconds: 60 };
 
 function json(body: unknown, status = 200, extra: Record<string, string> = {}): Response {
@@ -41,15 +76,41 @@ function json(body: unknown, status = 200, extra: Record<string, string> = {}): 
 
 /** In-memory fallback limiter, per Worker isolate, used only when the LIMITER binding is missing. */
 const windows = new Map<string, { start: number; count: number }>();
-export function localLimit(key: string, now = Date.now()): boolean {
+export function localLimit(key: string, now = Date.now(), rule: { limit: number; periodSeconds: number } = RATE_LIMIT): boolean {
   const w = windows.get(key);
-  if (!w || now - w.start >= RATE_LIMIT.periodSeconds * 1000) {
+  if (!w || now - w.start >= rule.periodSeconds * 1000) {
     if (windows.size > 5_000) windows.clear();
     windows.set(key, { start: now, count: 1 });
     return true;
   }
   w.count++;
-  return w.count <= RATE_LIMIT.limit;
+  return w.count <= rule.limit;
+}
+
+/** HTTP status for a verify or invoice answer, so an agent can branch on the code alone. */
+export function statusCode(status: string): number {
+  switch (status) {
+    case "paid":
+    case "pending":
+    case "open":
+    case "ok":
+      return 200;
+    case "not_found":
+      return 404;
+    case "unavailable":
+      return 503;
+    default:
+      return 422; // mismatch, failed
+  }
+}
+
+function publicInvoice(inv: StoredInvoice, origin: string) {
+  const c = chainById(inv.chainId)!;
+  return {
+    ...inv,
+    payUrl: `${origin}/?invoice=${encodeURIComponent(inv.memo)}&chain=${inv.chainId}`,
+    explorer: inv.paid ? `${c.explorer}/tx/${inv.paid.txHash}` : null,
+  };
 }
 
 function bad(message: string, status = 400): Response {
@@ -85,11 +146,60 @@ async function token(chain: MezoChain): Promise<TokenInfo> {
   return info;
 }
 
+async function invoices(req: Request, url: URL, env: Env): Promise<Response> {
+  const kv = env.INVOICES;
+  if (!kv) return bad("The invoice store is not configured.", 503);
+  const p = url.searchParams;
+  const rest = url.pathname.slice("/api/invoices".length);
+  if (req.method === "POST" && rest === "") {
+    let body: { chain?: unknown; to?: unknown; amount?: unknown; memo?: unknown };
+    try {
+      body = (await req.json()) as typeof body;
+    } catch {
+      return bad("Send a JSON body, for example {\"chain\":31611,\"to\":\"0x...\",\"amount\":\"12.5\"}");
+    }
+    const chain = chainById(Number(body.chain ?? 31611));
+    if (!chain) return bad("chain must be 31611 or 31612");
+    const head = await headBlock(chain);
+    const r = await createInvoice(kv, chain, { to: String(body.to ?? ""), amount: String(body.amount ?? ""), memo: body.memo == null ? null : String(body.memo) }, head);
+    if (!r.ok) return json({ ok: false, reasons: r.reasons }, r.status);
+    return json({ ok: true, invoice: publicInvoice(r.invoice, url.origin), qrSvg: qrSvg(r.invoice.link) }, 201);
+  }
+  if (req.method !== "GET") return bad("GET or POST only", 405);
+  const chain = chainParam(url);
+  if (!chain) return bad("chain must be 31611 or 31612");
+  if (rest === "") {
+    const to = checkAddress(p.get("to") ?? "", false);
+    if (!to.ok) return bad(to.message);
+    const list = await listInvoices(kv, chain.id, to.address);
+    return json({ chainId: chain.id, to: to.address, invoices: list.map((i) => publicInvoice(i, url.origin)) });
+  }
+  const memo = decodeURIComponent(rest.slice(1));
+  if (!MEMO_PATTERN.test(memo)) return bad("Not an invoice reference.");
+  const inv = await getInvoice(kv, chain.id, memo);
+  if (!inv) return bad(`No invoice ${memo} on ${chain.name}.`, 404);
+  if (p.get("check") === "0") return json({ status: inv.paid ? "paid" : "open", invoice: publicInvoice(inv, url.origin) });
+  const c = await checkInvoice(kv, chain, inv);
+  const extra = c.status === "open" ? { clamped: c.inbox.clamped, possible: c.inbox.payments.filter((x) => x.possible).map(({ amountUnits: _u, ...x }) => x), head: c.inbox.head } : {};
+  return json({ status: c.status, invoice: publicInvoice(c.invoice, url.origin), ...extra, ...(c.status === "unavailable" ? { message: c.message } : {}) }, statusCode(c.status));
+}
+
 async function api(url: URL): Promise<Response> {
   const p = url.searchParams;
   switch (url.pathname) {
-    case "/api/health":
-      return json({ ok: true, chains: MEZO_CHAINS.map((c) => ({ id: c.id, name: c.name, musd: c.musd })) });
+    case "/api/health": {
+      // Probes each chain once with a short read, so the answer says whether the RPC works right now.
+      const chains = await Promise.all(
+        MEZO_CHAINS.map(async (c) => {
+          try {
+            return { id: c.id, name: c.name, musd: c.musd, rpc: true, block: Number(await rpc<string>(c, "eth_blockNumber", [], fetch, 2)) };
+          } catch {
+            return { id: c.id, name: c.name, musd: c.musd, rpc: false, block: null };
+          }
+        }),
+      );
+      return json({ ok: chains.every((c) => c.rpc), chains }, chains.every((c) => c.rpc) ? 200 : 503);
+    }
 
     case "/api/token": {
       if (p.get("chain") === "all") {
@@ -147,7 +257,7 @@ async function api(url: URL): Promise<Response> {
       const r = await verifyPayment(chain, { txHash: p.get("tx") ?? "", recipient: to.address, amount, memo: p.get("memo"), fromBlock });
       const tx = p.get("tx") ?? "";
       const explorer = /^0x[0-9a-fA-F]{64}$/.test(tx) ? `${chain.explorer}/tx/${tx}` : null;
-      return json({ chainId: chain.id, ...r, explorer });
+      return json({ chainId: chain.id, ...r, explorer }, statusCode(r.status));
     }
 
     case "/api/payments": {
@@ -161,7 +271,7 @@ async function api(url: URL): Promise<Response> {
       const amount = rawAmount ? parseAmount(rawAmount) : null;
       if (rawAmount && amount === null) return bad("amount must be a decimal MUSD amount, for example 12.5");
       const r = await findPayments(chain, { recipient: to.address, fromBlock, memo: p.get("memo") || null, amount });
-      if (r.status !== "ok") return json({ chainId: chain.id, ...r }, 502);
+      if (r.status !== "ok") return json({ chainId: chain.id, ...r }, 503);
       const payments = r.payments.map(({ amountUnits: _u, ...rest }) => ({ ...rest, explorer: `${chain.explorer}/tx/${rest.txHash}` }));
       return json({ chainId: chain.id, ...r, payments, paid: payments.find((x) => x.txHash === r.paid?.txHash) ?? null });
     }
@@ -182,7 +292,7 @@ async function api(url: URL): Promise<Response> {
       if (rawRatio && (ratioPct === null || ratioPct === 0n)) return bad("ratio must be a percentage, for example ratio=200");
       const t = await terms(chain);
       const q = quoteBorrow(t, need, ratioPct === null ? undefined : ratioPct / 100n);
-      return json({ chainId: chain.id, terms: t, quote: q, borrowAt: chain.testnet ? "https://testnet.mezo.org" : "https://mezo.org", source: "eth_call on BorrowerOperations, TroveManager, PriceFeed and InterestRateManager" });
+      return json({ chainId: chain.id, terms: t, quote: q, borrowAt: chain.testnet ? "https://testnet.mezo.org/borrow" : "https://mezo.org/borrow", source: "eth_call on BorrowerOperations, TroveManager, PriceFeed and InterestRateManager" });
     }
 
     default:
@@ -197,14 +307,30 @@ export default {
       const pure = PURE_ROUTES.has(url.pathname);
       const cors: Record<string, string> = pure ? { "access-control-allow-origin": "*" } : {};
       if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: { ...JSON_HEADERS, ...cors, "access-control-allow-methods": "GET" } });
-      if (req.method !== "GET") return bad("GET only", 405);
+      const isInvoices = url.pathname === "/api/invoices" || url.pathname.startsWith("/api/invoices/");
+      if (req.method !== "GET" && !(isInvoices && req.method === "POST")) return bad("GET only", 405);
       if (!pure) {
         const key = req.headers.get("cf-connecting-ip") ?? "local";
-        const allowed = env.LIMITER ? (await env.LIMITER.limit({ key })).success : localLimit(key);
+        // The in-isolate counter catches bursts at once. The Cloudflare binding counts across isolates in
+        // a location, with some delay. A request must pass both.
+        const local = req.method === "POST" ? localLimit("create:" + key, Date.now(), CREATE_LIMIT) : localLimit(key);
+        const rule = req.method === "POST" ? CREATE_LIMIT : RATE_LIMIT;
+        let exact: boolean | null = null;
+        if (local && env.CLIENT_LIMITER) {
+          try {
+            const name = (req.method === "POST" ? "create:" : "read:") + key;
+            const stub = env.CLIENT_LIMITER.get(env.CLIENT_LIMITER.idFromName(name));
+            exact = (await stub.fetch(new Request(`https://limiter/?limit=${rule.limit}&period=${rule.periodSeconds}`))).status === 200;
+          } catch {
+            exact = null; // the limiter itself failed, do not block the call
+          }
+        }
+        const bound = local && exact !== false && env.LIMITER ? (await env.LIMITER.limit({ key })).success : null;
+        const allowed = local && exact !== false && bound !== false;
         if (!allowed) return json({ error: `Too many chain reads. The limit is ${RATE_LIMIT.limit} a minute per client.` }, 429, { "retry-after": String(RATE_LIMIT.periodSeconds) });
       }
       try {
-        const res = await api(url);
+        const res = isInvoices ? await invoices(req, url, env) : await api(url);
         for (const [k, v] of Object.entries(cors)) res.headers.set(k, v);
         return res;
       } catch (e) {

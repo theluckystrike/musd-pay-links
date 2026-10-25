@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { MEZO_TESTNET } from "../src/chains.ts";
-import worker, { localLimit, PURE_ROUTES, RATE_LIMIT } from "../src/worker.ts";
+import worker, { ClientLimiter, localLimit, PURE_ROUTES, RATE_LIMIT } from "../src/worker.ts";
 
 const SHOP = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed";
 const env = { ASSETS: { fetch: async () => new Response("asset") } };
@@ -71,7 +71,7 @@ describe("worker API (no network routes)", () => {
   });
 
   it("allows any origin only on routes that do not read the chain", async () => {
-    expect([...PURE_ROUTES].sort()).toEqual(["/api/check", "/api/health", "/api/link"]);
+    expect([...PURE_ROUTES].sort()).toEqual(["/api/check", "/api/link"]);
     const link = await get(`/api/link?chain=31611&to=${SHOP}&amount=1`);
     expect(link.headers.get("access-control-allow-origin")).toBe("*");
     const chainRoute = await get(`/api/balance?chain=31611&address=0x12`, "GET", { "cf-connecting-ip": "203.0.113.10" });
@@ -109,5 +109,33 @@ describe("worker API (no network routes)", () => {
     for (let i = 0; i < RATE_LIMIT.limit; i++) expect(localLimit("k-window", t0)).toBe(true);
     expect(localLimit("k-window", t0 + 1)).toBe(false);
     expect(localLimit("k-window", t0 + RATE_LIMIT.periodSeconds * 1000)).toBe(true);
+  });
+
+  it("counts exactly across isolates with the Durable Object limiter", async () => {
+    const objects = new Map<string, ClientLimiter>();
+    const ns = {
+      idFromName: (n: string) => n,
+      get: (id: unknown) => {
+        const k = String(id);
+        if (!objects.has(k)) objects.set(k, new ClientLimiter());
+        return { fetch: (r: Request) => objects.get(k)!.fetch(r) };
+      },
+    };
+    const e = { ...env, CLIENT_LIMITER: ns };
+    const codes: number[] = [];
+    // The in-isolate counter and the Durable Object both allow RATE_LIMIT.limit calls. The object must be asked.
+    for (let i = 0; i < RATE_LIMIT.limit + 2; i++) {
+      const res = await worker.fetch(new Request("https://x.test/api/head?chain=7", { headers: { "cf-connecting-ip": "100.64.0.1" } }), e);
+      codes.push(res.status);
+    }
+    expect(codes.slice(0, RATE_LIMIT.limit).every((c) => c === 400)).toBe(true);
+    expect(codes.slice(RATE_LIMIT.limit)).toEqual([429, 429]);
+    expect([...objects.keys()]).toEqual(["read:100.64.0.1"]);
+  });
+
+  it("does not block calls when the limiter itself fails", async () => {
+    const broken = { idFromName: () => 1, get: () => ({ fetch: async () => { throw new Error("down"); } }) };
+    const res = await worker.fetch(new Request("https://x.test/api/head?chain=7", { headers: { "cf-connecting-ip": "100.64.0.2" } }), { ...env, CLIENT_LIMITER: broken });
+    expect(res.status).toBe(400);
   });
 });

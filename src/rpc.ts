@@ -5,7 +5,6 @@ import { decodeFunctionResult, encodeFunctionData, erc20Abi, getAddress } from "
 import { formatAmount } from "./amount.ts";
 import { type MezoChain } from "./chains.ts";
 import { MEMO_PATTERN } from "./eip681.ts";
-import { memoToHex } from "./guard.ts";
 
 export type Fetch = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -193,7 +192,8 @@ export async function verifyPayment(chain: MezoChain, input: VerifyInput, fetchI
   }
   let memoMatched: boolean | null = null;
   if (input.memo) {
-    memoMatched = tx.input.toLowerCase().endsWith(memoToHex(input.memo).slice(2).toLowerCase());
+    // Exact match of the decoded reference, so "XINV-1" does not pay invoice "INV-1".
+    memoMatched = tx.to?.toLowerCase() === chain.musd.toLowerCase() && memoFromInput(tx.input) === input.memo;
     if (!memoMatched) {
       return {
         status: "mismatch",

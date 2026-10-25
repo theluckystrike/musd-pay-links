@@ -62,6 +62,25 @@ describe("verifyPayment", () => {
     expect(r).toMatchObject({ status: "mismatch" });
   });
 
+  it("matches the reference exactly, so a longer reference that ends the same does not count", async () => {
+    const f = mockRpc({
+      ...base,
+      eth_getTransactionByHash: () => ({ input: buildTransferData(SHOP, 5n, "XINV-1"), to: MEZO_TESTNET.musd }),
+      eth_getTransactionReceipt: () => receipt([{ address: MEZO_TESTNET.musd, to: SHOP, value: 5n }]),
+    });
+    expect(await verifyPayment(MEZO_TESTNET, { txHash: HASH, recipient: SHOP, amount: 5n, memo: "INV-1" }, f)).toMatchObject({ status: "mismatch" });
+    expect(await verifyPayment(MEZO_TESTNET, { txHash: HASH, recipient: SHOP, amount: 5n, memo: "XINV-1" }, f)).toMatchObject({ status: "paid", memoMatched: true });
+  });
+
+  it("does not read a reference from a transaction sent to another contract", async () => {
+    const f = mockRpc({
+      ...base,
+      eth_getTransactionByHash: () => ({ input: buildTransferData(SHOP, 5n, "INV-1"), to: "0x2222222222222222222222222222222222222222" }),
+      eth_getTransactionReceipt: () => receipt([{ address: MEZO_TESTNET.musd, to: SHOP, value: 5n }]),
+    });
+    expect(await verifyPayment(MEZO_TESTNET, { txHash: HASH, recipient: SHOP, amount: 5n, memo: "INV-1" }, f)).toMatchObject({ status: "mismatch" });
+  });
+
   it("ignores Transfer events from a fake token contract", async () => {
     const fake = "0x118917a40FAF1CD7a13dB0Ef56C86De7973Ac504";
     const f = mockRpc({ ...base, eth_getTransactionReceipt: () => receipt([{ address: fake, to: SHOP, value: 10n ** 30n }]) });

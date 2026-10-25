@@ -113,8 +113,9 @@ describe("lookalike and wrong tokens", () => {
     expect(codes(link({ token: bad }))).toContain("token_bad_checksum");
   });
 
-  it("refuses lowercase MUSD when checksums are required, accepts it when not", () => {
-    expect(codes(link({ token: T.toLowerCase() }))).toEqual(["token_no_checksum"]);
+  it("accepts the MUSD address in all lowercase or all uppercase, since it is compared with a fixed address", () => {
+    expect(codes(link({ token: T.toLowerCase() }))).toEqual([]);
+    expect(codes(link({ token: "0x" + T.slice(2).toUpperCase() }))).toEqual([]);
     expect(codes(link({ token: T.toLowerCase() }), { maxAmount: "100", requireChecksum: false })).toEqual([]);
   });
 

@@ -22,13 +22,13 @@ MUSD Pay Links lets anyone request MUSD on Mezo with a standard EIP-681 link. A 
 
 The problem. Paying someone in MUSD today means copying an address and an amount by hand, or trusting whatever a link or QR code says. A payment link is plain text. One changed character can point it at a fake token, at another chain, at an attacker's address, or at a much larger amount. AI agents that pay for users make this worse, because they act on text they did not write. A second problem is access. A Bitcoin holder who wants to pay in MUSD often holds no MUSD yet.
 
-The merchant creates an EIP-681 link for a MUSD transfer on Mezo Testnet (31611) or Mezo Mainnet (31612), a QR code and a pay page URL to send in Telegram or any chat. Every invoice gets a reference and is stamped with the current block. Each link passes through the payer guard before it is shown.
+The merchant creates an invoice for MUSD on Mezo Testnet (31611) or Mezo Mainnet (31612). The Worker saves it, gives it a reference that is unique on that chain, and stamps it with the current block. The merchant gets an EIP-681 link, a QR code and a pay page URL to send in Telegram or any chat. Each link passes through the payer guard before it is shown.
 
 The payer side parses the link strictly. The token must be the MUSD contract for the link's chain id. The recipient must have a correct EIP-55 checksum, and must be on the payer's allowlist when one is set. The amount must be within the payer's limit, with exact integer math at 18 decimals. Unicode tricks, percent-encoding, duplicated or unknown parameters, execution parameters and functions such as `approve` are refused. Every refusal has a code and a plain reason. When all checks pass, the guard returns an unsigned `transfer` call. It never holds a key.
 
-When the payer is short of MUSD, the page reads the MUSD protocol on Mezo. It reads the BTC price from PriceFeed, MCR, CCR, the minimum debt, the gas compensation and the fee from BorrowerOperations, the interest rate from InterestRateManager, and the system ratio and recovery mode from TroveManager. It then shows the BTC to lock, the debt, the liquidation price and a link to borrow in the Mezo app. The payer keeps the Bitcoin and pays in MUSD.
+When the payer is short of MUSD, the page reads the MUSD protocol on Mezo. It reads the BTC price from PriceFeed, MCR, CCR, the minimum debt, the gas compensation and the fee from BorrowerOperations, the interest rate from InterestRateManager, and the system ratio and recovery mode from TroveManager. It then shows the BTC to lock, the debt, the liquidation price and a link to the borrow page of the Mezo app. The payer keeps the Bitcoin and pays in MUSD.
 
-The merchant inbox reads MUSD Transfer logs to the merchant address since the invoice block. It decodes the reference from each payment and marks the invoice paid with the oldest payment that carries the reference and covers the amount. Each invoice gets a fresh random reference, so one payment pays one invoice. A payment of the exact amount without a reference shows as a possible match, because some wallets drop the reference. The payer does not need to send a hash. A payment from before the invoice block is refused, so an old transfer cannot pay a new invoice.
+Checking an invoice reads MUSD Transfer logs to the merchant address since the invoice block. It decodes the reference from each payment and marks the invoice paid with the oldest payment that carries the exact reference and covers the amount. The payer does not need to send a hash. A transaction that paid one invoice cannot pay another. A payment from before the invoice block does not count. A payment of the exact amount without a reference shows as a possible match, because some wallets drop the reference. Invoices work on any device and expire after 30 days.
 
 How MUSD is used and positioned. MUSD is the only asset the product moves. It uses the MUSD token on both Mezo chains and four contracts of the MUSD protocol. The addresses come from the Mezo docs and the official deployment files in github.com/mezo-org/musd. The goal is to make MUSD easy to ask for, safe to pay, and easy to get for a Bitcoin holder who has none yet. Which wallets open these links has not been tested yet.
 
@@ -38,7 +38,7 @@ Small online sellers, freelancers and creators who want to be paid in a Bitcoin-
 
 ## Tech stack
 
-TypeScript, viem, qrcode-generator, Vitest, Cloudflare Workers with static assets and the rate limiting binding, public Mezo JSON-RPC endpoints, Mezo Blockscout explorers.
+TypeScript, viem, qrcode-generator, Vitest, Cloudflare Workers with static assets, KV and a Durable Object, public Mezo JSON-RPC endpoints, Mezo Blockscout explorers.
 
 ## Track
 
@@ -70,7 +70,7 @@ Testnet deployment. A live web app and JSON API on Cloudflare Workers read the M
 
 ## Evidence
 
-244 tests pass, 238 offline and 6 that read Mezo over RPC. They cover the guard's attack cases, the borrow quote rules, batched log search, replay by block, the RPC fallback, CORS and the rate limit. Contract reads and `eth_call` dry runs are in `docs/evidence.json` in the repository.
+261 tests pass, 255 offline and 6 that read Mezo over RPC. They cover the guard's attack cases, the borrow quote rules, invoices, batched log search, replay by block, the RPC fallback, CORS, the rate limit and the HTTP codes. Contract reads and `eth_call` dry runs are in `docs/evidence.json` in the repository.
 
 ## What is next
 

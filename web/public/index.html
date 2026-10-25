@@ -90,7 +90,7 @@ footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
   </header>
   <p class="lede">A merchant asks for MUSD with a standard EIP-681 link, a QR code or a pay page sent in a chat. Before the payer's wallet or agent builds the transfer, the guard checks that the token is the real MUSD for that chain, that the recipient address is valid and checksummed, and that the amount is within the payer's limit. A payer who is short of MUSD sees how much BTC would mint it in the MUSD protocol. The merchant finds the payment on chain by its invoice reference.</p>
   <ol class="steps" id="steps">
-    <li>Create an invoice link in panel 1. Share the QR code or the pay page.</li>
+    <li>Create an invoice in panel 1. Share the QR code or the pay page.</li>
     <li>Check the link as the payer in panel 2. Try the bad links to see the guard refuse them.</li>
     <li>Short of MUSD? Panel 4 reads the live MUSD protocol and quotes the BTC to lock.</li>
     <li>Watch for the payment in panel 1, or confirm a transaction hash in panel 3.</li>
@@ -106,7 +106,7 @@ footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
   <div class="grid" style="margin-top:16px">
     <section class="panel" id="m-panel" aria-labelledby="m-h">
       <h2 id="m-h">1. Merchant, request MUSD</h2>
-      <p class="sub">Creates the link and QR code. The link is run through the payer guard before it is shown.</p>
+      <p class="sub">Saves an invoice with a unique reference, stamps it with the current block, and gives you the link, the QR code and a pay page. The link is run through the payer guard before it is shown.</p>
       <label for="m-chain">Network</label>
       <select id="m-chain">
         <option value="31611">Mezo Testnet (31611)</option>
@@ -116,11 +116,11 @@ footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
       <input id="m-to" autocomplete="off" spellcheck="false" value="0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed">
       <div class="row">
         <div><label for="m-amount">Amount in MUSD</label><input id="m-amount" inputmode="decimal" value="12.50"></div>
-        <div><label for="m-memo">Invoice reference</label><input id="m-memo" maxlength="32" value=""></div>
+        <div><label for="m-memo">Invoice reference (empty for a fresh one)</label><input id="m-memo" maxlength="32" value="" placeholder="INV-..."></div>
       </div>
-      <div class="actions"><button id="m-go">Create link</button><button class="ghost" id="m-new">New invoice</button></div>
+      <div class="actions"><button id="m-go">Create invoice</button></div>
       <div class="out" id="m-out" aria-live="polite"></div>
-      <h3 class="sub-h">Your invoices in this browser</h3>
+      <h3 class="sub-h">Invoices for this address</h3>
       <div id="m-list"></div>
     </section>
 
@@ -152,7 +152,7 @@ footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
 
     <section class="panel wide" aria-labelledby="v-h">
       <h2 id="v-h">3. Merchant, confirm the payment on chain</h2>
-      <p class="sub">Reads the transaction receipt and counts MUSD Transfer events from the real MUSD contract to the address you enter. With a reference, the payment must carry it. With an invoice block, a payment mined earlier is refused. Prefilled with a public 6 MUSD wallet to wallet transfer on Mezo Testnet made by someone else on 25 October 2026. It has no reference, so leave that field empty for it. Creating a link in panel 1 fills this form with that invoice.</p>
+      <p class="sub">Reads the transaction receipt and counts MUSD Transfer events from the real MUSD contract to the address you enter. With a reference, the payment must carry it. With an invoice block, a payment mined earlier is refused. Prefilled with a public 6 MUSD wallet to wallet transfer on Mezo Testnet made by someone else on 25 October 2026. It has no reference, so leave that field empty for it. Creating an invoice in panel 1 fills this form with that invoice.</p>
       <div class="row">
         <div style="flex:3 1 320px"><label for="v-tx">Transaction hash</label><input id="v-tx" spellcheck="false" value="0xc19b443ddcb35fdbe4389382dfff3815a82a0f2e12f43b00537d73db89be239a"></div>
         <div><label for="v-chain">Network</label><select id="v-chain"><option value="31611">Mezo Testnet</option><option value="31612">Mezo Mainnet</option></select></div>

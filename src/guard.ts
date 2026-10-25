@@ -58,7 +58,7 @@ export function buildTransferData(recipient: `0x${string}`, amount: bigint, memo
   return memo ? (`${call}${memoToHex(memo).slice(2)}` as `0x${string}`) : call;
 }
 
-function checkToken(target: string, chainId: number, requireChecksum: boolean, reasons: Reason[]): void {
+function checkToken(target: string, chainId: number, reasons: Reason[]): void {
   const chain = chainById(chainId)!;
   const addr = checkAddress(target, false);
   if (!addr.ok) {
@@ -66,12 +66,10 @@ function checkToken(target: string, chainId: number, requireChecksum: boolean, r
     return;
   }
   const lower = target.toLowerCase();
-  if (lower === chain.musd.toLowerCase()) {
-    if (requireChecksum && !addr.checksummed && /[a-fA-F]/.test(target.slice(2))) {
-      reasons.push({ code: "token_no_checksum", message: "The MUSD address in the link has no EIP-55 checksum." });
-    }
-    return;
-  }
+  // The token is compared with a fixed known address, so an all-lowercase or all-uppercase MUSD address is
+  // safe and is what many EIP-681 generators write. A mixed-case address with a wrong checksum was already
+  // refused above as token_bad_checksum, because it is a sign that the link was edited.
+  if (lower === chain.musd.toLowerCase()) return;
   const other = MEZO_CHAINS.find((c) => c.musd.toLowerCase() === lower);
   if (other) {
     reasons.push({
@@ -189,7 +187,7 @@ export function checkPaymentLink(link: unknown, policy: PayerPolicy): CheckResul
   }
 
   const reasons: Reason[] = [];
-  checkToken(raw.target, chain.id, requireChecksum, reasons);
+  checkToken(raw.target, chain.id, reasons);
   const recipient = checkRecipient(raw.params.get("address"), policy, requireChecksum, reasons);
   const amount = checkAmount(raw.params.get("uint256"), limit, reasons);
   const memo = raw.params.get("memo") ?? null;
