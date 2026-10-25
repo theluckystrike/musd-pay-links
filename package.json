@@ -1,5 +1,6 @@
 {
   "name": "musd-pay-links",
+  "repository": {"type": "git", "url": "theluckystrike/musd-pay-links.git"},
   "version": "0.1.0",
   "description": "Safe EIP-681 payment links and QR codes for MUSD on Mezo",
   "license": "MIT",
