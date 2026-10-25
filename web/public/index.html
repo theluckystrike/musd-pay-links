@@ -25,6 +25,7 @@
   --code: #26231e; --focus: #60a5fa;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
 main { max-width: 1080px; margin: 0 auto; padding: 24px 16px 64px; }
 header { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: baseline; justify-content: space-between; margin-bottom: 8px; }
@@ -43,7 +44,11 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
 .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
 .row > * { flex: 1 1 140px; }
 button { font: 600 14px/1 system-ui, sans-serif; border-radius: 8px; padding: 10px 14px; border: 1px solid var(--accent); background: var(--accent); color: var(--accent-ink); cursor: pointer; }
-button.ghost { background: transparent; color: var(--ink); border-color: var(--line); }
+button.ghost, a.button.ghost { background: transparent; color: var(--ink); border-color: var(--line); }
+a.button { display: inline-block; text-decoration: none; font: 600 14px/1 system-ui, sans-serif; border-radius: 8px; padding: 10px 14px; border: 1px solid var(--accent); background: var(--accent); color: var(--accent-ink); }
+a.button:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.banner { background: var(--ok-bg); border: 1px solid var(--ok); border-radius: 10px; padding: 12px 14px; margin: 0 0 16px; }
+.steps { margin: 0 0 16px; padding-left: 20px; color: var(--muted); font-size: 14px; }
 button:disabled { opacity: .5; cursor: not-allowed; }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
 .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
@@ -77,7 +82,14 @@ footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
     <h1>MUSD Pay Links</h1>
     <span class="muted">Mezo Buildathon, Access and Distribution track</span>
   </header>
-  <p class="lede">A merchant asks for MUSD with a standard EIP-681 link or QR code. Before the payer's wallet or agent builds the transfer, the guard checks that the token is the real MUSD for that chain, that the recipient address is valid and checksummed, and that the amount is within the payer's limit. Every refusal says why.</p>
+  <p class="lede">A merchant asks for MUSD with a standard EIP-681 link, a QR code or a pay page sent in a chat. Before the payer's wallet or agent builds the transfer, the guard checks that the token is the real MUSD for that chain, that the recipient address is valid and checksummed, and that the amount is within the payer's limit. A payer who is short of MUSD sees how much BTC would mint it in the MUSD protocol. The merchant finds the payment on chain by its invoice reference.</p>
+  <ol class="steps" id="steps">
+    <li>Create an invoice link in panel 1. Share the QR code or the pay page.</li>
+    <li>Check the link as the payer in panel 2. Try the bad links to see the guard refuse them.</li>
+    <li>Short of MUSD? Panel 4 reads the live MUSD protocol and quotes the BTC to lock.</li>
+    <li>Watch for the payment in panel 1, or confirm a transaction hash in panel 3.</li>
+  </ol>
+  <div class="banner" id="pay-banner" hidden><strong>You were sent a MUSD payment request.</strong> The guard below checked it in your browser. Set your limit, then pay from your wallet or check your balance first.</div>
 
   <section class="panel wide" id="live" aria-labelledby="live-h">
     <h2 id="live-h">Live MUSD contracts</h2>
@@ -86,7 +98,7 @@ footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
   </section>
 
   <div class="grid" style="margin-top:16px">
-    <section class="panel" aria-labelledby="m-h">
+    <section class="panel" id="m-panel" aria-labelledby="m-h">
       <h2 id="m-h">1. Merchant, request MUSD</h2>
       <p class="sub">Creates the link and QR code. The link is run through the payer guard before it is shown.</p>
       <label for="m-chain">Network</label>
@@ -98,9 +110,9 @@ footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
       <input id="m-to" autocomplete="off" spellcheck="false" value="0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed">
       <div class="row">
         <div><label for="m-amount">Amount in MUSD</label><input id="m-amount" inputmode="decimal" value="12.50"></div>
-        <div><label for="m-memo">Reference (optional)</label><input id="m-memo" maxlength="32" value="INV-1042"></div>
+        <div><label for="m-memo">Invoice reference</label><input id="m-memo" maxlength="32" value=""></div>
       </div>
-      <div class="actions"><button id="m-go">Create link</button></div>
+      <div class="actions"><button id="m-go">Create link</button><button class="ghost" id="m-new">New invoice</button></div>
       <div class="out" id="m-out" aria-live="polite"></div>
     </section>
 
@@ -123,28 +135,44 @@ footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
         <button id="p-pay" class="ghost" disabled>Pay with browser wallet</button>
       </div>
       <div class="out" id="p-out" aria-live="polite"></div>
+      <label for="p-from">Your address (optional, read only)</label>
+      <div class="row"><div style="flex:3 1 260px"><input id="p-from" spellcheck="false" autocomplete="off" placeholder="0x..."></div><div><button class="ghost" id="p-can" type="button">Can I pay this?</button></div></div>
+      <div class="out" id="p-bal-out" aria-live="polite"></div>
     </section>
 
     <section class="panel wide" aria-labelledby="v-h">
       <h2 id="v-h">3. Merchant, confirm the payment on chain</h2>
-      <p class="sub">Reads the transaction receipt and counts MUSD Transfer events from the real MUSD contract to the address you enter. Prefilled with a public MUSD transfer on Mezo Testnet made by someone else on 17 October 2026. That transfer was a contract to contract MUSD movement, not a payment to a merchant, and no merchant payment has been made yet. Verification retries a few times if the public RPC lags.</p>
+      <p class="sub">Reads the transaction receipt and counts MUSD Transfer events from the real MUSD contract to the address you enter. With a reference, the payment must carry it. With an invoice block, a payment mined earlier is refused. Prefilled with a public 6 MUSD wallet to wallet transfer on Mezo Testnet made by someone else on 25 October 2026. It has no reference, so leave that field empty for it. Creating a link in panel 1 fills this form with that invoice.</p>
       <div class="row">
-        <div style="flex:3 1 320px"><label for="v-tx">Transaction hash</label><input id="v-tx" spellcheck="false" value="0xfc56e25bdddcba0e1d2b43e7c92958d3fa9021d6e814e2dae430a83f7418d805"></div>
+        <div style="flex:3 1 320px"><label for="v-tx">Transaction hash</label><input id="v-tx" spellcheck="false" value="0xc19b443ddcb35fdbe4389382dfff3815a82a0f2e12f43b00537d73db89be239a"></div>
         <div><label for="v-chain">Network</label><select id="v-chain"><option value="31611">Mezo Testnet</option><option value="31612">Mezo Mainnet</option></select></div>
       </div>
       <div class="row">
-        <div style="flex:3 1 320px"><label for="v-to">Recipient</label><input id="v-to" spellcheck="false" value="0x484b5593BbB90383f94FB299470F09427cf6cfE2"></div>
-        <div><label for="v-amount">Expected MUSD</label><input id="v-amount" value="245.20190755"></div>
+        <div style="flex:3 1 320px"><label for="v-to">Recipient</label><input id="v-to" spellcheck="false" value="0x67A792C5025193C9cBDA498FE462Cbdf49C8a598"></div>
+        <div><label for="v-amount">Expected MUSD</label><input id="v-amount" value="6"></div>
         <div><label for="v-memo">Reference</label><input id="v-memo" value=""></div>
+        <div><label for="v-from">Invoice block</label><input id="v-from" inputmode="numeric" value="16360000"></div>
       </div>
       <div class="actions"><button id="v-go">Verify payment</button></div>
       <div class="out" id="v-out" aria-live="polite"></div>
     </section>
+
+    <section class="panel wide" aria-labelledby="b-h">
+      <h2 id="b-h">4. Payer, get MUSD with BTC (live MUSD protocol)</h2>
+      <p class="sub">MUSD is minted against BTC. This quote reads the live rules from the MUSD protocol contracts on Mezo (BorrowerOperations, TroveManager, PriceFeed and InterestRateManager). It shows the BTC to lock, the fee, the protocol minimum and the liquidation price. Nothing is signed here. The borrow itself happens in the Mezo app.</p>
+      <div class="row">
+        <div><label for="b-need">MUSD you need</label><input id="b-need" inputmode="decimal" value="25"></div>
+        <div><label for="b-ratio">Collateral ratio in percent</label><input id="b-ratio" inputmode="decimal" value="200"></div>
+        <div><label for="b-chain">Network</label><select id="b-chain"><option value="31611">Mezo Testnet</option><option value="31612">Mezo Mainnet</option></select></div>
+      </div>
+      <div class="actions"><button id="b-go">Get the quote</button></div>
+      <div class="out" id="b-out" aria-live="polite"></div>
+    </section>
   </div>
 
   <footer>
-    Open source under the MIT license: <a href="https://github.com/theluckystrike/musd-pay-links">github.com/theluckystrike/musd-pay-links</a>.
-    JSON API at <code>/api/check</code>, <code>/api/link</code>, <code>/api/verify</code>, <code>/api/token</code>. Built by Michael Lip, Warsaw, Poland.
+    Open source under the MIT license at <a href="https://github.com/theluckystrike/musd-pay-links">github.com/theluckystrike/musd-pay-links</a>.
+    JSON API at <code>/api/check</code>, <code>/api/link</code>, <code>/api/verify</code>, <code>/api/payments</code>, <code>/api/borrow</code>, <code>/api/token</code>. Built by Michael Lip, Warsaw, Poland.
   </footer>
 </main>
 <script type="module" src="/client.js"></script>
