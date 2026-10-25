@@ -174,13 +174,18 @@ async function invoices(req: Request, url: URL, env: Env): Promise<Response> {
     const list = await listInvoices(kv, chain.id, to.address);
     return json({ chainId: chain.id, to: to.address, invoices: list.map((i) => publicInvoice(i, url.origin)) });
   }
-  const memo = decodeURIComponent(rest.slice(1));
+  let memo: string;
+  try {
+    memo = decodeURIComponent(rest.slice(1));
+  } catch {
+    return bad("Not an invoice reference.");
+  }
   if (!MEMO_PATTERN.test(memo)) return bad("Not an invoice reference.");
   const inv = await getInvoice(kv, chain.id, memo);
   if (!inv) return bad(`No invoice ${memo} on ${chain.name}.`, 404);
   if (p.get("check") === "0") return json({ status: inv.paid ? "paid" : "open", invoice: publicInvoice(inv, url.origin) });
   const c = await checkInvoice(kv, chain, inv);
-  const extra = c.status === "open" ? { clamped: c.inbox.clamped, possible: c.inbox.payments.filter((x) => x.possible).map(({ amountUnits: _u, ...x }) => x), head: c.inbox.head } : {};
+  const extra = c.status === "open" ? { clamped: c.inbox.clamped, truncated: c.inbox.truncated, possible: c.inbox.payments.filter((x) => x.possible).map(({ amountUnits: _u, ...x }) => x), head: c.inbox.head } : {};
   return json({ status: c.status, invoice: publicInvoice(c.invoice, url.origin), ...extra, ...(c.status === "unavailable" ? { message: c.message } : {}) }, statusCode(c.status));
 }
 

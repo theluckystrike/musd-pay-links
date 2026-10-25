@@ -88,7 +88,7 @@ interface ServerInvoice {
   chainId: number; to: string; amount: string; units: string; memo: string; fromBlock: number; createdAt: string; link: string;
   payUrl: string; explorer: string | null; paid?: { txHash: string; block: number; from: string; amount: string };
 }
-interface InvoiceAnswer { status: string; invoice?: ServerInvoice; possible?: InboxPayment[]; clamped?: boolean; head?: number; message?: string; error?: string; reasons?: { code: string; message: string }[] }
+interface InvoiceAnswer { status: string; invoice?: ServerInvoice; possible?: InboxPayment[]; clamped?: boolean; truncated?: boolean; head?: number; message?: string; error?: string; reasons?: { code: string; message: string }[] }
 interface InboxPayment { txHash: string; block: number; from: string; amount: string; memo: string | null; possible?: boolean }
 
 let memoEdited = false;
@@ -216,7 +216,10 @@ function renderInvoiceAnswer(a: InvoiceAnswer): string {
   const maybe = possible.length
     ? `<div class="verdict bad" style="margin-top:8px"><strong>Possible match. ${possible.length} payment(s) of exactly this amount arrived without a reference.</strong> Some wallets drop the reference. Ask the payer which one is theirs, then confirm it by hash in panel 3.</div>`
     : "";
-  const warn = a.clamped ? `<div class="note">The invoice is older than the inbox window (about 23 hours), so earlier blocks were not searched. Confirm by hash in panel 3.</div>` : "";
+  const warn = [
+    a.clamped ? "The invoice is older than the search window (about 23 hours), so earlier blocks were not searched. Confirm by hash in panel 3." : "",
+    a.truncated ? "This address receives many payments. Only the newest 50 were read. Confirm by hash in panel 3." : "",
+  ].filter(Boolean).map((w) => `<div class="note">${esc(w)}</div>`).join("");
   return `<div class="muted">No payment with reference ${esc(inv?.memo ?? "")} yet. Searched up to block ${(a.head ?? 0).toLocaleString("en-US")}.</div>${maybe}${warn}`;
 }
 

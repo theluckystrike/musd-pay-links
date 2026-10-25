@@ -150,6 +150,7 @@ describe("invoice routes", () => {
     expect(body.invoice.payUrl).toBe("https://pay.test/?invoice=INV-R&chain=31611");
     expect((await call(e, "/api/invoices/INV-NONE?chain=31611&check=0")).status).toBe(404);
     expect((await call(e, "/api/invoices/bad%23ref?chain=31611")).status).toBe(400);
+    expect((await call(e, "/api/invoices/%E0%A4%A?chain=31611")).status).toBe(400);
   });
 
   it("lists invoices by merchant address", async () => {
