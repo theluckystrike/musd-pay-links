@@ -5,6 +5,7 @@ import { MEZO_MAINNET, MEZO_TESTNET } from "../src/chains.ts";
 import { buildTransferData } from "../src/guard.ts";
 import {
   findPayments,
+  rpcBatch,
   LOG_CHUNK,
   MAX_LOOKBACK,
   memoFromInput,
@@ -199,22 +200,26 @@ describe("findPayments", () => {
   const PAYER = "0x1111111111111111111111111111111111111111";
   const HEAD = 1_000_000;
   type L = { tx: string; block: number; value: bigint; token?: string };
-  function inbox(logs: L[], inputs: Record<string, { input: string; to: string }>, calls: { method: string; params: unknown[] }[] = []): Fetch {
-    return async (_url, init) => {
-      const { method, params } = JSON.parse(String(init!.body)) as { method: string; params: unknown[] };
+  function inbox(logs: L[], inputs: Record<string, { input: string; to: string }>, calls: { method: string; params: unknown[] }[] = [], requests: { n: number } = { n: 0 }): Fetch {
+    const answer = (method: string, params: unknown[]) => {
       calls.push({ method, params });
-      let result: unknown = null;
-      if (method === "eth_blockNumber") result = "0x" + HEAD.toString(16);
-      if (method === "eth_getTransactionByHash") result = inputs[params[0] as string] ?? null;
+      if (method === "eth_blockNumber") return "0x" + HEAD.toString(16);
+      if (method === "eth_getTransactionByHash") return inputs[params[0] as string] ?? null;
       if (method === "eth_getLogs") {
         const q = params[0] as { fromBlock: string; toBlock: string; topics: string[] };
         const [from, to] = [Number(q.fromBlock), Number(q.toBlock)];
-        result = logs
+        return logs
           .filter((l) => l.block >= from && l.block <= to)
           .sort((a, b) => a.block - b.block)
           .map((l) => ({ transactionHash: l.tx, blockNumber: "0x" + l.block.toString(16), topics: [TRANSFER_TOPIC, pad(PAYER), q.topics[2]], data: "0x" + l.value.toString(16) }));
       }
-      return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result }));
+      return null;
+    };
+    return async (_url, init) => {
+      requests.n++;
+      const body = JSON.parse(String(init!.body)) as { id: number; method: string; params: unknown[] } | { id: number; method: string; params: unknown[] }[];
+      if (Array.isArray(body)) return new Response(JSON.stringify(body.map((b) => ({ jsonrpc: "2.0", id: b.id, result: answer(b.method, b.params) }))));
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: answer(body.method, body.params) }));
     };
   }
   const h = (n: number) => "0x" + n.toString(16).padStart(64, "0");
@@ -287,11 +292,100 @@ describe("findPayments", () => {
     expect(q.topics).toEqual([TRANSFER_TOPIC, null, pad(SHOP)]);
   });
 
-  it("reports an unavailable network when the RPC is down", async () => {
+  it("reports an unavailable network with the reason when the RPC is down", async () => {
     const f: Fetch = async () => {
       throw new Error("down");
     };
-    expect(await findPayments(MEZO_TESTNET, { recipient: SHOP }, f)).toEqual({ status: "unavailable", message: NETWORK_UNAVAILABLE_MESSAGE });
+    expect(await findPayments(MEZO_TESTNET, { recipient: SHOP }, f)).toEqual({ status: "unavailable", message: NETWORK_UNAVAILABLE_MESSAGE, detail: "down" });
+  });
+
+  it("stays far below the 50 subrequest limit of a Worker, even with 60 payments", async () => {
+    const logs: L[] = [];
+    const inputs: Record<string, { input: string; to: string }> = {};
+    for (let i = 1; i <= 60; i++) {
+      logs.push({ tx: h(i), block: HEAD - i * 300, value: 1n });
+      inputs[h(i)] = direct(null, 1n);
+    }
+    const requests = { n: 0 };
+    const r = await findPayments(MEZO_TESTNET, { recipient: SHOP, fromBlock: 0 }, inbox(logs, inputs, [], requests));
+    expect(requests.n).toBeLessThanOrEqual(3);
+    expect(r.status === "ok" && r.payments.length).toBe(50);
+    expect(r.status === "ok" && r.truncated).toBe(true);
+    expect(r.status === "ok" && r.clamped).toBe(true);
+  });
+
+  it("marks the oldest payment with the reference as the one that paid, so a later one cannot take its place", async () => {
+    const f = inbox(
+      [
+        { tx: h(1), block: HEAD - 30, value: 5n },
+        { tx: h(2), block: HEAD - 3, value: 5n },
+      ],
+      { [h(1)]: direct("INV-7", 5n), [h(2)]: direct("INV-7", 5n) },
+    );
+    const r = await findPayments(MEZO_TESTNET, { recipient: SHOP, fromBlock: HEAD - 100, memo: "INV-7", amount: 5n }, f);
+    expect(r.status === "ok" && r.paid?.txHash).toBe(h(1));
+  });
+
+  it("flags a payment without a reference but with the exact amount as a possible match only", async () => {
+    const f = inbox(
+      [
+        { tx: h(1), block: HEAD - 3, value: 5n },
+        { tx: h(2), block: HEAD - 2, value: 6n },
+      ],
+      { [h(1)]: direct(null, 5n), [h(2)]: direct(null, 6n) },
+    );
+    const r = await findPayments(MEZO_TESTNET, { recipient: SHOP, memo: "INV-7", amount: 5n }, f);
+    if (r.status !== "ok") throw new Error("expected ok");
+    expect(r.paid).toBeNull();
+    expect(r.payments.find((p) => p.txHash === h(1))!.possible).toBe(true);
+    expect(r.payments.find((p) => p.txHash === h(2))!.possible).toBe(false);
+  });
+
+  it("asks again for transactions that a lagging node answered as null", async () => {
+    let first = true;
+    const base = inbox([{ tx: h(1), block: HEAD - 1, value: 5n }], { [h(1)]: direct("INV-7", 5n) });
+    const f: Fetch = async (url, init) => {
+      const body = JSON.parse(String(init!.body));
+      if (Array.isArray(body) && body[0].method === "eth_getTransactionByHash" && first) {
+        first = false;
+        return new Response(JSON.stringify(body.map((b: { id: number }) => ({ jsonrpc: "2.0", id: b.id, result: null }))));
+      }
+      return base(url, init);
+    };
+    const r = await findPayments(MEZO_TESTNET, { recipient: SHOP, memo: "INV-7", amount: 5n }, f);
+    expect(r.status === "ok" && r.paid?.txHash).toBe(h(1));
+  });
+});
+
+describe("rpcBatch", () => {
+  it("retries the batch on the other endpoint when one item has an error", async () => {
+    const urls: string[] = [];
+    const f: Fetch = async (url, init) => {
+      urls.push(url);
+      const body = JSON.parse(String(init!.body)) as { id: number }[];
+      const broken = url === MEZO_TESTNET.rpc;
+      return new Response(JSON.stringify(body.map((b) => (broken && b.id === 1 ? { jsonrpc: "2.0", id: b.id, error: { message: "method does not exist" } } : { jsonrpc: "2.0", id: b.id, result: b.id }))));
+    };
+    const calls = [0, 1, 2].map(() => ({ method: "eth_blockNumber", params: [] }));
+    expect(await rpcBatch(MEZO_TESTNET, calls, f)).toEqual([0, 1, 2]);
+    expect(urls).toEqual([MEZO_TESTNET.rpc, MEZO_TESTNET.rpcFallback]);
+  });
+
+  it("matches answers by id even when the node returns them out of order", async () => {
+    const f: Fetch = async (_url, init) => {
+      const body = JSON.parse(String(init!.body)) as { id: number }[];
+      return new Response(JSON.stringify([...body].reverse().map((b) => ({ jsonrpc: "2.0", id: b.id, result: `r${b.id}` }))));
+    };
+    expect(await rpcBatch(MEZO_TESTNET, [{ method: "a", params: [] }, { method: "b", params: [] }], f)).toEqual(["r0", "r1"]);
+  });
+
+  it("treats null as an error when nulls are not allowed, and throws after every try", async () => {
+    const f: Fetch = async (_url, init) => {
+      const body = JSON.parse(String(init!.body)) as { id: number }[];
+      return new Response(JSON.stringify(body.map((b) => ({ jsonrpc: "2.0", id: b.id, result: null }))));
+    };
+    await expect(rpcBatch(MEZO_TESTNET, [{ method: "eth_getLogs", params: [] }], f, { allowNull: false })).rejects.toThrow("null");
+    expect(await rpcBatch(MEZO_TESTNET, [{ method: "x", params: [] }], f)).toEqual([null]);
   });
 });
 

@@ -1,13 +1,13 @@
 {
-  "at": "2026-10-18T01:15:00.504Z",
+  "at": "2026-10-25T14:22:08.287Z",
   "testnetToken": {
     "chainId": 31611,
     "address": "0x118917a40FAF1CD7a13dB0Ef56C86De7973Ac503",
     "name": "Mezo USD",
     "symbol": "MUSD",
     "decimals": 18,
-    "totalSupply": "523692374.067481604023211843",
-    "block": 16217672
+    "totalSupply": "523893019.239097900397485064",
+    "block": 16361833
   },
   "mainnetToken": {
     "chainId": 31612,
@@ -15,8 +15,8 @@
     "name": "Mezo USD",
     "symbol": "MUSD",
     "decimals": 18,
-    "totalSupply": "29789446.675024547685037942",
-    "block": 12585187
+    "totalSupply": "29482016.986182972908040124",
+    "block": 12756525
   },
   "holderBalance": "38210825700027446161068038",
   "simulations": {
@@ -33,17 +33,101 @@
   },
   "verifyReal": {
     "status": "paid",
-    "paid": "245.20190755",
-    "confirmations": 5741,
+    "paid": "6",
+    "confirmations": 1112,
     "memoMatched": null,
-    "block": 16211933
+    "block": 16360722
   },
   "verifyTooHigh": {
-    "status": "mismatch",
-    "message": "MUSD received by the recipient in this transaction is 245.20190755, expected 245.201907550000000001."
+    "status": "unavailable",
+    "message": "The network did not answer. Try again in a moment."
   },
   "verifyWrongRecipient": {
     "status": "mismatch",
     "message": "MUSD received by the recipient in this transaction is 0, expected 0.000000000000000001."
+  },
+  "verifyWrongReference": {
+    "status": "mismatch",
+    "message": "This payment does not carry the reference INV-0001 in its input data, so it cannot mark this invoice paid."
+  },
+  "verifyBeforeInvoiceBlock": {
+    "status": "mismatch",
+    "message": "This transaction was mined in block 16360722, before the invoice was created in block 16360723. An older payment cannot pay a new invoice."
+  },
+  "borrowTestnet": {
+    "terms": {
+      "chainId": 31611,
+      "price": "80225908480000000000000",
+      "mcr": "1100000000000000000",
+      "ccr": "1500000000000000000",
+      "minNetDebt": "1800000000000000000000",
+      "gasCompensation": "200000000000000000000",
+      "borrowingRate": "1000000000000000",
+      "interestRateBps": 100,
+      "tcr": "2881842135126692283",
+      "recoveryMode": false,
+      "troves": 330
+    },
+    "quoteFor25": {
+      "need": "25000000000000000000",
+      "borrow": "1800000000000000000000",
+      "fee": "1800000000000000000",
+      "gasCompensation": "200000000000000000000",
+      "totalDebt": "2001800000000000000000",
+      "ratio": "2000000000000000000",
+      "collateral": "49904078069718358",
+      "minCollateral": "27447242938345097",
+      "liquidationPrice": "44124249663999999467856",
+      "yearlyInterest": "18018000000000000000",
+      "notes": [
+        "The protocol minimum is 1800 MUSD, so the trove mints 1775 MUSD more than the link asks for. You keep the rest.",
+        "The 200 MUSD gas compensation is part of the debt and comes back when the trove is closed."
+      ]
+    }
+  },
+  "borrowMainnet": {
+    "terms": {
+      "chainId": 31612,
+      "price": "80232000000000000000000",
+      "mcr": "1100000000000000000",
+      "ccr": "1500000000000000000",
+      "minNetDebt": "1800000000000000000000",
+      "gasCompensation": "200000000000000000000",
+      "borrowingRate": "1000000000000000",
+      "interestRateBps": 100,
+      "tcr": "91860390015089227333",
+      "recoveryMode": false,
+      "troves": 1
+    },
+    "quoteFor25": {
+      "need": "25000000000000000000",
+      "borrow": "1800000000000000000000",
+      "fee": "1800000000000000000",
+      "gasCompensation": "200000000000000000000",
+      "totalDebt": "2001800000000000000000",
+      "ratio": "2000000000000000000",
+      "collateral": "49900289161431848",
+      "minCollateral": "27445159038787517",
+      "liquidationPrice": "44127599999999999683272",
+      "yearlyInterest": "18018000000000000000",
+      "notes": [
+        "The protocol minimum is 1800 MUSD, so the trove mints 1775 MUSD more than the link asks for. You keep the rest.",
+        "The 200 MUSD gas compensation is part of the debt and comes back when the trove is closed."
+      ]
+    }
+  },
+  "openTroveSimulation": {
+    "borrow": "1800000000000000000000",
+    "collateral": "49904657523257206",
+    "to": "0xCdF7028ceAB81fA0C6971208e83fa7872994beE5",
+    "result": "ok 0x"
+  },
+  "inbox": {
+    "status": "ok",
+    "fromBlock": 16341840,
+    "head": 16361840,
+    "payments": 17,
+    "withReference": 0,
+    "newest": "0x14e9d6337af2f99c7c0ac1930edc6cbcd1b5cb9e0dcc4fa19f5ffe07c8939e0a"
   }
 }

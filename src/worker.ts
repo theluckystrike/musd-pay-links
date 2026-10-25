@@ -145,7 +145,9 @@ async function api(url: URL): Promise<Response> {
       const fromBlock = blockParam(p.get("from_block"));
       if (fromBlock === undefined) return bad("from_block must be a block number");
       const r = await verifyPayment(chain, { txHash: p.get("tx") ?? "", recipient: to.address, amount, memo: p.get("memo"), fromBlock });
-      return json({ chainId: chain.id, ...r, explorer: `${chain.explorer}/tx/${p.get("tx")}` });
+      const tx = p.get("tx") ?? "";
+      const explorer = /^0x[0-9a-fA-F]{64}$/.test(tx) ? `${chain.explorer}/tx/${tx}` : null;
+      return json({ chainId: chain.id, ...r, explorer });
     }
 
     case "/api/payments": {
@@ -161,7 +163,7 @@ async function api(url: URL): Promise<Response> {
       const r = await findPayments(chain, { recipient: to.address, fromBlock, memo: p.get("memo") || null, amount });
       if (r.status !== "ok") return json({ chainId: chain.id, ...r }, 502);
       const payments = r.payments.map(({ amountUnits: _u, ...rest }) => ({ ...rest, explorer: `${chain.explorer}/tx/${rest.txHash}` }));
-      return json({ chainId: chain.id, ...r, payments, paid: payments.find((x) => x.matches) ?? null });
+      return json({ chainId: chain.id, ...r, payments, paid: payments.find((x) => x.txHash === r.paid?.txHash) ?? null });
     }
 
     case "/api/head": {

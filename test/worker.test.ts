@@ -97,6 +97,13 @@ describe("worker API (no network routes)", () => {
     expect(keys).toEqual(["192.0.2.1"]);
   });
 
+  it("gives no explorer link for a malformed hash", async () => {
+    const res = await get(`/api/verify?chain=31611&to=${SHOP}&amount=1&tx=zzz`, "GET", { "cf-connecting-ip": "203.0.113.50" });
+    const body = (await res.json()) as { status: string; explorer: string | null };
+    expect(body.status).toBe("not_found");
+    expect(body.explorer).toBeNull();
+  });
+
   it("opens a fresh window after the period", () => {
     const t0 = 1_000_000;
     for (let i = 0; i < RATE_LIMIT.limit; i++) expect(localLimit("k-window", t0)).toBe(true);

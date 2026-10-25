@@ -19,7 +19,8 @@ At phone width (390 px) the page has no horizontal scroll, see [docs/demo-mobile
 - Reliability. Testnet now has a second RPC endpoint, mainnet moved off an endpoint that refused `eth_call`, and reads retry up to 6 times.
 - Chain routes send no CORS header and are rate limited per client.
 - A scripted path from test BTC to a paid invoice (`testnet-borrow` and `testnet-pay`).
-- Tests went from 204 to 236.
+- Invoice list in the browser, possible-match hints when a wallet drops the reference, and a network choice for the payer.
+- Tests went from 204 to 244.
 
 ## What it does
 
@@ -29,10 +30,10 @@ MUSD Pay Links has five parts.
 
 1. The merchant side creates a standard EIP-681 link and a QR code for MUSD on Mezo, with the amount, the recipient and an optional reference such as an invoice number.
 2. The payer side is a TypeScript library (and the same code in the demo page) that parses the link and refuses it unless three checks pass. The token must be the real MUSD contract for that chain id. The recipient must be a valid address with a correct EIP-55 checksum, and on the payer's allowlist when one is set. The amount must be within the payer's limit, compared with exact integer math at 18 decimals. Every refusal comes with a code and a plain reason.
-3. The merchant can then confirm the payment on chain. The verifier reads the receipt and counts only Transfer events emitted by the real MUSD contract to the merchant's address. When the link carried a reference, the verifier also requires the payment input to end with the same reference. A payment that does not carry it is refused, so one old payment cannot mark several invoices paid.
+3. The merchant can then confirm the payment on chain. The verifier reads the receipt and counts only Transfer events emitted by the real MUSD contract to the merchant's address. When the link carried a reference, the verifier also requires the payment input to end with the same reference. A payment that does not carry it is refused. The page gives every invoice a fresh random reference (about 40 bits) and warns when a reference is reused for the same address, so one payment matches one invoice. With a reused reference, one payment could match both invoices.
 
 4. A payer who is short of MUSD sees how much BTC would mint it. The borrow quote reads the live rules of the MUSD protocol on Mezo (the BTC price from PriceFeed, MCR, CCR, the minimum debt, the gas compensation and the fee from BorrowerOperations, the interest rate from InterestRateManager, the system ratio and recovery mode from TroveManager). It gives the BTC to lock, the debt, the liquidation price and a hand-off to the Mezo app. The payer keeps the Bitcoin and spends MUSD.
-5. The merchant can watch for the payment without a hash from the payer. The inbox reads MUSD Transfer logs to the merchant address since the block in which the invoice was created, decodes the reference from each payment, and marks the invoice paid when a payment carries its reference and covers the amount.
+5. The merchant can watch for the payment without a hash from the payer. The inbox reads MUSD Transfer logs to the merchant address since the block in which the invoice was created, decodes the reference from each payment, and marks the invoice paid with the oldest payment that carries its reference and covers the amount. A payment of exactly the amount without a reference is shown as a possible match for a person to confirm, because some wallets drop the reference. The inbox looks back at most 20,000 blocks (about 23 hours on testnet) and says so when an invoice is older. It sends its log queries and transaction reads as JSON-RPC batches, so one inbox call uses a handful of requests. The page keeps a list of the invoices it created in the browser (localStorage, up to 20) with a Check button each.
 
 The library never holds a key and never signs. It returns an unsigned transaction (`to` is the MUSD contract, `value` is 0, `data` is `transfer(recipient, amount)`) for the wallet or agent to sign.
 
@@ -45,7 +46,7 @@ Both addresses come from the official Mezo docs, page "MUSD Payments With x402" 
 | Mezo Testnet | 31611 | [`0x118917a40FAF1CD7a13dB0Ef56C86De7973Ac503`](https://explorer.test.mezo.org/token/0x118917a40FAF1CD7a13dB0Ef56C86De7973Ac503) | `https://rpc.test.mezo.org` |
 | Mezo Mainnet | 31612 | [`0xdD468A1DDc392dcdbEf6db6e34E89AA338F9F186`](https://explorer.mezo.org/token/0xdD468A1DDc392dcdbEf6db6e34E89AA338F9F186) | `https://mezo-mainnet.boar.network` |
 
-Chain ids and RPC endpoints are from https://mezo.org/docs/developers/getting-started/configure-environment/ and were confirmed with `eth_chainId`. Each chain has a second endpoint. On mainnet it is https://mainnet.mezo.public.validationcloud.io from the same docs table. On testnet the docs list one endpoint, so the second one is the public dRPC node https://mezo-testnet.drpc.org, which answers chain id 31611. A read retries up to 6 times, waits 300 ms times the attempt number, and alternates between the two endpoints, so a node that lags and answers null for a mined transaction is skipped. On 25 October 2026 the dRPC mainnet node refused `eth_call`, so mainnet now starts at Boar, the endpoint the Mezo docs use in their own examples.
+Chain ids and RPC endpoints are from https://mezo.org/docs/developers/getting-started/configure-environment/ and were confirmed with `eth_chainId`. Each chain has a second endpoint. On mainnet it is https://mainnet.mezo.public.validationcloud.io from the same docs table. On testnet the docs list one endpoint, so the second one is the public dRPC node https://mezo-testnet.drpc.org, which answers chain id 31611. It is a partial fallback. On 25 October 2026 some of its backends answered receipts and others answered "method does not exist", and its free plan limits log ranges. A read retries up to 6 times, waits 300 ms times the attempt number, and alternates between the two endpoints. A null answer from a lagging node and an error from the fallback both count as a failed try, so the next try goes back to the other endpoint. Measured on the live Worker on 25 October 2026, 29 of 30 verify calls answered paid and 22 of 22 inbox calls answered. The demo page retries a failed verify call, so a click recovers. On 25 October 2026 the dRPC mainnet node refused `eth_call`, so mainnet now starts at Boar, the endpoint the Mezo docs use in their own examples.
 
 ### MUSD protocol contracts
 
@@ -138,6 +139,7 @@ The attacker controls the link text. They may also control the page or message t
 | Very long links, fragments, malformed queries, ENS names | Refused | `too_long`, `fragment`, `malformed_query`, `ens_or_bad_target` |
 | Replay of an older payment under a new invoice reference | The verifier requires the payment input to carry the link's reference, otherwise `mismatch` | `mismatch` |
 | Replay of an older payment with no reference | The merchant stamps the invoice with its creation block. A payment mined earlier is refused, and the inbox does not search before it | `mismatch` |
+| A payer's page accepts a link for the other Mezo network | The payer picks the networks they accept. The demo defaults to Mezo Testnet only | `wrong_chain` |
 
 Out of scope. The guard does not judge whether the merchant is honest, and it does not replace the wallet's own confirmation screen. It does not check sanctions lists. A payer who sets a high limit and no allowlist can still pay a real but unwanted address. The verifier trusts the RPC node it reads from (the Worker uses the public Mezo RPC endpoints listed above).
 
@@ -159,8 +161,9 @@ What is verified against the real contracts, with no key.
 | `openTrove` simulation for the smallest trove | no revert |
 | `verifyPayment` on the public transfer above | `paid`, 6 MUSD |
 | `findPayments` on an active testnet address | lists its MUSD payments with references decoded |
+| `verifyPayment` with an invoice block after the transfer | `mismatch` |
 
-The raw output of the first checks is in [docs/evidence.json](docs/evidence.json). Run `pnpm evidence` to read it again.
+The raw output of every check above is in [docs/evidence.json](docs/evidence.json), regenerated on 25 October 2026. Run `pnpm evidence` to read it again.
 
 The demo page has a payment path that has not been used with a real wallet yet. A payer opens the page with a wallet that holds testnet MUSD, checks a link and presses "Pay with browser wallet". The page switches the wallet to Mezo Testnet, reads the MUSD balance, shows the borrow quote when the balance is short, asks the wallet to sign the checked transaction, and confirms the receipt with the verifier.
 
@@ -196,15 +199,15 @@ Run on 25 October 2026 with `LIVE=1 pnpm test`.
  ✓ test/borrow.test.ts    13 tests (2 live)
  ✓ test/guard.test.ts     93 tests
  ✓ test/merchant.test.ts  15 tests
- ✓ test/rpc.test.ts       30 tests (4 live)
- ✓ test/worker.test.ts    13 tests
+ ✓ test/rpc.test.ts       37 tests (4 live)
+ ✓ test/worker.test.ts    14 tests
  Test Files  7 passed (7)
-      Tests  236 passed (236)
+      Tests  244 passed (244)
 ```
 
-Without network, `pnpm test` gives 230 passed and 6 skipped.
+Without network, `pnpm test` gives 238 passed and 6 skipped.
 
-The guard suite covers wrong chains, lookalike tokens, uint256 overflow and wraparound, bad checksums, eleven unicode tricks, percent-encoding, extra and duplicated parameters, dangerous functions, and 2,000 random inputs that must never throw. The merchant suite creates 300 links with pseudo-random amounts and checks that each one passes the guard with the same amount. The verifier suite uses fake RPCs that answer null, fail, or lag on the first endpoint, and checks that a payment without the reference or from before the invoice block is refused. The inbox suite checks chunked log queries (at most 5,000 blocks a call, at most 20,000 blocks back), reference decoding, sums inside one transaction and the amount rule. The borrow suite checks the minimum debt, the fee, rounding up of the BTC, the liquidation price, and the MCR and recovery mode floors. The worker suite checks CORS and the rate limit. `pnpm typecheck` passes and `pnpm audit --prod` reports no known vulnerabilities.
+The guard suite covers wrong chains, lookalike tokens, uint256 overflow and wraparound, bad checksums, eleven unicode tricks, percent-encoding, extra and duplicated parameters, dangerous functions, and 2,000 random inputs that must never throw. The merchant suite creates 300 links with pseudo-random amounts and checks that each one passes the guard with the same amount. The verifier suite uses fake RPCs that answer null, fail, or lag on the first endpoint, and checks that a payment without the reference or from before the invoice block is refused. The inbox suite checks chunked log queries (at most 5,000 blocks a range, at most 20,000 blocks back), batching (60 payments in at most 3 requests), the oldest-payment rule, possible matches, lagging nodes, reference decoding, sums inside one transaction and the amount rule. The borrow suite checks the minimum debt, the fee, rounding up of the BTC, the liquidation price, and the MCR and recovery mode floors. The worker suite checks CORS and the rate limit. `pnpm typecheck` passes and `pnpm audit --prod` reports no known vulnerabilities.
 
 ## Project layout
 

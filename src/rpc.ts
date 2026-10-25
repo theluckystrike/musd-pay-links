@@ -206,14 +206,52 @@ export async function verifyPayment(chain: MezoChain, input: VerifyInput, fetchI
   return { status: "paid", paid: formatAmount(paid), confirmations: head - block + 1, memoMatched, block };
 }
 
-/** Most blocks one eth_getLogs call asks for. Both testnet endpoints refuse ranges above 10,000. */
+/** Most blocks one eth_getLogs call asks for. The Mezo testnet RPC refuses ranges above 10,000. */
 export const LOG_CHUNK = 5_000;
 /** Most blocks a payment search looks back. About 23 hours on Mezo Testnet at about 4.2 s a block. */
 export const MAX_LOOKBACK = 20_000;
-/** Most transactions a payment search reads in full to find the reference. */
-export const MAX_TX_READS = 20;
+/** Most transactions a payment search reads in full to find the reference, in one batch request. */
+export const MAX_TX_READS = 50;
 
 const TRANSFER_SELECTOR = "a9059cbb";
+
+/**
+ * One JSON-RPC batch request. Cloudflare Workers allow 50 subrequests per call on the free plan, so the
+ * inbox sends its log queries and its transaction reads as batches instead of one fetch each.
+ * Retries the whole batch, alternating endpoints, when the request fails or any item has an error.
+ * With `allowNull`, null items are kept. Without it, null items are retried like errors.
+ */
+export async function rpcBatch<T>(
+  chain: MezoChain,
+  calls: { method: string; params: unknown[] }[],
+  fetchImpl: Fetch = fetch,
+  { tries = 3, allowNull = true }: { tries?: number; allowNull?: boolean } = {},
+): Promise<(T | null)[]> {
+  if (calls.length === 0) return [];
+  const urls = rpcEndpoints(chain);
+  let lastError: unknown = null;
+  for (let i = 0; i < tries; i++) {
+    try {
+      const res = await fetchImpl(urls[i % urls.length]!, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(calls.map((c, id) => ({ jsonrpc: "2.0", id, method: c.method, params: c.params }))),
+      });
+      if (!res.ok) throw new Error(`RPC batch HTTP ${res.status}`);
+      const body = (await res.json()) as { id: number; result?: T; error?: { message: string } }[];
+      if (!Array.isArray(body) || body.length !== calls.length) throw new Error("RPC batch answer has the wrong length");
+      const byId = new Map(body.map((b) => [b.id, b]));
+      const out = calls.map((_c, id) => byId.get(id));
+      const bad = out.find((b) => !b || b.error || (!allowNull && (b.result === null || b.result === undefined)));
+      if (bad) throw new Error(bad.error ? `RPC batch item error ${bad.error.message}` : "RPC batch item missing or null");
+      return out.map((b) => (b!.result ?? null) as T | null);
+    } catch (e) {
+      lastError = e;
+    }
+    if (i < tries - 1) await sleep(retry.delayMs * (i + 1));
+  }
+  throw lastError;
+}
 
 /**
  * The reference a MUSD payment carries: the ASCII bytes after transfer(address,uint256) in the input.
@@ -237,6 +275,8 @@ export interface FoundPayment {
   memo: string | null;
   /** True when the payment carries the wanted reference and at least the wanted amount. */
   matches: boolean;
+  /** True when the payment carries no reference but has exactly the wanted amount. Needs a human check. */
+  possible: boolean;
 }
 
 export interface FindInput {
@@ -248,48 +288,89 @@ export interface FindInput {
 }
 
 export type FindResult =
-  | { status: "ok"; head: number; fromBlock: number; payments: FoundPayment[]; paid: FoundPayment | null }
-  | { status: "unavailable"; message: string };
+  | {
+      status: "ok";
+      head: number;
+      fromBlock: number;
+      /** True when the wanted start block was older than MAX_LOOKBACK and the search started later. */
+      clamped: boolean;
+      /** True when more payments were found than MAX_TX_READS, so the oldest ones were not read. */
+      truncated: boolean;
+      payments: FoundPayment[];
+      /** The oldest payment that carries the reference and covers the amount. */
+      paid: FoundPayment | null;
+    }
+  | { status: "unavailable"; message: string; detail: string };
 
 interface Log { transactionHash: string; blockNumber: string; topics: string[]; data: string }
 
 /**
  * Merchant inbox: list MUSD transfers to `recipient` since `fromBlock`, newest first, and read the
- * reference of each. With a memo, `paid` is the newest payment that carries it and covers the amount.
- * The payer does not need to send a transaction hash.
+ * reference of each. With a memo, `paid` is the oldest payment after the invoice block that carries it
+ * and covers the amount, so a later payment with the same reference cannot take its place.
+ * The payer does not need to send a transaction hash. Uses at most 1 + 3 + 3 * 3 RPC requests.
  */
 export async function findPayments(chain: MezoChain, input: FindInput, fetchImpl?: Fetch): Promise<FindResult> {
   const topic = "0x" + input.recipient.toLowerCase().slice(2).padStart(64, "0");
   try {
     const head = Number(await rpc<string>(chain, "eth_blockNumber", [], fetchImpl));
     const floor = Math.max(0, head - MAX_LOOKBACK);
-    const start = Math.min(head, Math.max(floor, input.fromBlock ?? floor));
-    const logs: Log[] = [];
-    for (let to = head; to >= start && logs.length < MAX_TX_READS; to -= LOG_CHUNK) {
-      const from = Math.max(start, to - LOG_CHUNK + 1);
-      const filter = { address: chain.musd, fromBlock: "0x" + from.toString(16), toBlock: "0x" + to.toString(16), topics: [TRANSFER_TOPIC, null, topic] };
-      const chunk = await rpc<Log[]>(chain, "eth_getLogs", [filter], fetchImpl);
-      logs.push(...[...chunk].reverse());
-    }
+    const wanted = input.fromBlock ?? floor;
+    const start = Math.min(head, Math.max(floor, wanted));
+    const ranges: [number, number][] = [];
+    for (let to = head; to >= start; to -= LOG_CHUNK) ranges.push([Math.max(start, to - LOG_CHUNK + 1), to]);
+    const chunks = await rpcBatch<Log[]>(
+      chain,
+      ranges.map(([from, to]) => ({
+        method: "eth_getLogs",
+        params: [{ address: chain.musd, fromBlock: "0x" + from.toString(16), toBlock: "0x" + to.toString(16), topics: [TRANSFER_TOPIC, null, topic] }],
+      })),
+      fetchImpl,
+      { allowNull: false },
+    );
+    const logs = chunks.flatMap((c) => [...(c ?? [])].reverse()); // newest first
     // One entry per transaction, summing every MUSD transfer to the recipient inside it.
     const byTx = new Map<string, { block: number; from: string; units: bigint }>();
+    let truncated = false;
     for (const log of logs) {
       const hit = byTx.get(log.transactionHash);
       if (hit) hit.units += BigInt(log.data);
       else if (byTx.size < MAX_TX_READS) byTx.set(log.transactionHash, { block: Number(log.blockNumber), from: getAddress("0x" + log.topics[1]!.slice(26)), units: BigInt(log.data) });
+      else truncated = true;
     }
-    const payments: FoundPayment[] = [];
-    for (const [txHash, p] of byTx) {
-      const tx = await rpcNotNull<{ input: string; to: string | null }>(chain, "eth_getTransactionByHash", [txHash], fetchImpl, 3);
+    const hashes = [...byTx.keys()];
+    const txs = await readTransactions(chain, hashes, fetchImpl);
+    const payments: FoundPayment[] = hashes.map((txHash, i) => {
+      const p = byTx.get(txHash)!;
+      const tx = txs[i];
       const direct = !!tx && tx.to?.toLowerCase() === chain.musd.toLowerCase();
       const memo = direct ? memoFromInput(tx!.input) : null;
       const matches = !!input.memo && memo === input.memo && p.units >= (input.amount ?? 0n);
-      payments.push({ txHash, block: p.block, from: p.from, amount: formatAmount(p.units), amountUnits: p.units, memo, matches });
-    }
-    return { status: "ok", head, fromBlock: start, payments, paid: payments.find((p) => p.matches) ?? null };
-  } catch {
-    return { status: "unavailable", message: NETWORK_UNAVAILABLE_MESSAGE };
+      const possible = memo === null && input.amount != null && p.units === input.amount;
+      return { txHash, block: p.block, from: p.from, amount: formatAmount(p.units), amountUnits: p.units, memo, matches, possible };
+    });
+    const paid = [...payments].reverse().find((p) => p.matches) ?? null;
+    return { status: "ok", head, fromBlock: start, clamped: wanted < floor, truncated, payments, paid };
+  } catch (e) {
+    return { status: "unavailable", message: NETWORK_UNAVAILABLE_MESSAGE, detail: String((e as Error)?.message ?? e).slice(0, 200) };
   }
+}
+
+/** Read transactions in batches. A lagging node can answer null, so null items are asked again, up to 3 rounds. */
+async function readTransactions(chain: MezoChain, hashes: string[], fetchImpl?: Fetch): Promise<({ input: string; to: string | null } | null)[]> {
+  const out: ({ input: string; to: string | null } | null)[] = hashes.map(() => null);
+  for (let round = 0; round < 3; round++) {
+    const missing = out.map((v, i) => (v ? -1 : i)).filter((i) => i >= 0);
+    if (missing.length === 0) break;
+    const got = await rpcBatch<{ input: string; to: string | null }>(
+      chain,
+      missing.map((i) => ({ method: "eth_getTransactionByHash", params: [hashes[i]] })),
+      fetchImpl,
+    );
+    missing.forEach((i, k) => (out[i] = got[k] ?? null));
+    if (round < 2 && out.some((v) => !v)) await sleep(retry.delayMs * (round + 1));
+  }
+  return out;
 }
 
 /** Current block number, so a merchant can stamp an invoice when it is created. */

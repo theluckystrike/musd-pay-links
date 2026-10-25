@@ -68,7 +68,9 @@ function renderVerdict(r: CheckResult): string {
 function runCheck(): void {
   const link = $<HTMLTextAreaElement>("p-link").value;
   const allow = $<HTMLTextAreaElement>("p-allow").value.split(/\s+/).filter(Boolean);
+  const net = $<HTMLSelectElement>("p-net").value;
   const r = checkPaymentLink(link, {
+    allowedChains: net === "both" ? undefined : [Number(net)],
     maxAmount: $("p-max").value.trim(),
     allowlist: allow.length ? allow : undefined,
     requireChecksum: $<HTMLSelectElement>("p-check").value === "1",
@@ -83,8 +85,66 @@ function runCheck(): void {
 
 /** A fresh invoice reference, so every link can be matched to exactly one payment. */
 function newMemo(): string {
-  const n = crypto.getRandomValues(new Uint32Array(1))[0]! % 1_000_000;
-  return `INV-${n.toString().padStart(6, "0")}`;
+  const A = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const bytes = crypto.getRandomValues(new Uint8Array(8));
+  return "INV-" + [...bytes].map((b) => A[b % A.length]).join(""); // about 40 bits, unique per invoice
+}
+
+// Invoices this browser created. Kept in localStorage as a convenience only. The chain is the record.
+interface Invoice { chainId: number; to: string; amount: string; memo: string; block: number | null; at: string; paidTx?: string }
+const STORE = "musd-pay-links.invoices.v1";
+function loadInvoices(): Invoice[] {
+  try {
+    const v = JSON.parse(localStorage.getItem(STORE) ?? "[]") as Invoice[];
+    return Array.isArray(v) ? v.slice(0, 20) : [];
+  } catch {
+    return [];
+  }
+}
+function saveInvoices(list: Invoice[]): void {
+  try {
+    localStorage.setItem(STORE, JSON.stringify(list.slice(0, 20)));
+  } catch {
+    /* storage blocked, the page still works */
+  }
+}
+function upsertInvoice(inv: Invoice): void {
+  const list = loadInvoices().filter((x) => !(x.memo === inv.memo && x.to === inv.to && x.chainId === inv.chainId));
+  saveInvoices([inv, ...list]);
+  renderInvoices();
+}
+function renderInvoices(): void {
+  const list = loadInvoices();
+  const box = $("m-list");
+  if (list.length === 0) {
+    box.innerHTML = `<div class="muted">No invoices in this browser yet.</div>`;
+    return;
+  }
+  box.innerHTML = `<table class="inv"><thead><tr><th>Reference</th><th>MUSD</th><th>Network</th><th>Status</th><th></th></tr></thead><tbody>${list
+    .map((x, i) => {
+      const c = chainById(x.chainId);
+      const st = x.paidTx ? `<a href="${c?.explorer}/tx/${esc(x.paidTx)}" target="_blank" rel="noopener">paid</a>` : "open";
+      return `<tr><td class="mono-cell">${esc(x.memo)}</td><td>${esc(x.amount)}</td><td>${c?.testnet ? "Testnet" : "Mainnet"}</td><td id="inv-st-${i}">${st}</td><td><button class="ghost small" data-inv="${i}">Check</button></td></tr>`;
+    })
+    .join("")}</tbody></table>`;
+  box.querySelectorAll<HTMLButtonElement>("button[data-inv]").forEach((b) => {
+    b.onclick = () => void checkInvoice(Number(b.dataset.inv));
+  });
+}
+async function checkInvoice(i: number): Promise<void> {
+  const inv = loadInvoices()[i];
+  if (!inv) return;
+  const cell = $(`inv-st-${i}`);
+  cell.textContent = "checking...";
+  const q = new URLSearchParams({ chain: String(inv.chainId), to: inv.to, amount: inv.amount, memo: inv.memo, from_block: inv.block === null ? "" : String(inv.block) });
+  try {
+    const v = (await (await fetch(`/api/payments?${q}`)).json()) as InboxAnswer;
+    if (v.status !== "ok") throw new Error(v.error ?? v.message ?? "unavailable");
+    if (v.paid) upsertInvoice({ ...inv, paidTx: v.paid.txHash });
+    else cell.textContent = v.clamped ? "open (older than about 23 h, check by hash)" : "open";
+  } catch (e) {
+    cell.textContent = `not checked (${(e as Error).message})`;
+  }
 }
 
 async function headBlock(chainId: number): Promise<number | null> {
@@ -105,6 +165,7 @@ let watchTimer: number | null = null;
 async function runCreate(fillVerify = true): Promise<void> {
   if (!$("m-memo").value.trim()) $("m-memo").value = newMemo();
   const chainId = Number($<HTMLSelectElement>("m-chain").value);
+  const reused = loadInvoices().some((x) => x.memo === $("m-memo").value.trim() && x.to.toLowerCase() === $("m-to").value.trim().toLowerCase());
   const r = createPaymentLink({ chainId, recipient: $("m-to").value, amount: $("m-amount").value, memo: $("m-memo").value });
   if (!r.ok) {
     $("m-out").innerHTML = renderVerdict(r);
@@ -119,10 +180,12 @@ async function runCreate(fillVerify = true): Promise<void> {
     <a class="button ghost" href="${esc(tg)}" target="_blank" rel="noopener">Share in Telegram</a>
     <button class="ghost" id="m-send">Check it as the payer</button></div>
     <div class="actions"><button id="m-watch">Watch for this payment</button></div>
+    ${reused ? `<div class="verdict bad" style="margin-top:10px"><strong>You already used this reference for this address. One payment could then match two invoices. Press "New invoice" for a fresh reference.</strong></div>` : ""}
     <div class="out" id="m-watch-out" aria-live="polite"><div class="muted">Stamping the invoice with the current block...</div></div>`;
   $("m-copy").onclick = () => navigator.clipboard?.writeText(r.link);
   $("m-copy-page").onclick = () => navigator.clipboard?.writeText(page);
   $("m-send").onclick = () => {
+    $<HTMLSelectElement>("p-net").value = String(chainId);
     $<HTMLTextAreaElement>("p-link").value = r.link;
     runCheck();
     $("p-h").scrollIntoView({ behavior: "smooth" });
@@ -130,6 +193,7 @@ async function runCreate(fillVerify = true): Promise<void> {
   const block = await headBlock(chainId);
   const stamp = block === null ? "The block could not be read, so older payments are not excluded." : `Invoice created at block ${block.toLocaleString("en-US")}. Payments mined before it do not count.`;
   $("m-watch-out").innerHTML = `<div class="muted">${esc(stamp)}</div>`;
+  if (fillVerify && !reused) upsertInvoice({ chainId, to: r.payment.recipient, amount: r.payment.amountText, memo: r.payment.memo ?? "", block, at: new Date().toISOString() });
   $("m-watch").onclick = () => void watchPayment(chainId, r.payment.recipient, r.payment.amountText, r.payment.memo ?? "", block);
   if (!fillVerify) return;
   // Fill the confirm panel with this invoice, so the merchant can also check a hash by hand.
@@ -152,11 +216,19 @@ function renderInbox(v: InboxAnswer, chainId: number): string {
     .slice(0, 5)
     .map((p) => `<li><a href="${c.explorer}/tx/${esc(p.txHash)}" target="_blank" rel="noopener">${esc(p.txHash.slice(0, 12))}...</a> ${esc(p.amount)} MUSD, reference ${p.memo ? esc(p.memo) : "none"}</li>`)
     .join("");
-  return `<div class="muted">No payment with this reference yet. Searched blocks ${v.fromBlock.toLocaleString("en-US")} to ${v.head.toLocaleString("en-US")}.</div>${rows ? `<div class="muted" style="margin-top:6px">Other MUSD payments to this address</div><ul class="muted">${rows}</ul>` : ""}`;
+  const possible = v.payments.filter((p) => p.possible);
+  const maybe = possible.length
+    ? `<div class="verdict bad" style="margin-top:8px"><strong>Possible match. ${possible.length} payment(s) of exactly this amount arrived without a reference.</strong> Some wallets drop the reference. Ask the payer which one is theirs, then confirm it by hash in panel 3.</div>`
+    : "";
+  const warn = [
+    v.clamped ? "The invoice is older than the inbox window (about 23 hours), so earlier blocks were not searched. Confirm by hash in panel 3." : "",
+    v.truncated ? "This address receives many payments. Only the newest 50 were read." : "",
+  ].filter(Boolean).map((w) => `<div class="note">${esc(w)}</div>`).join("");
+  return `<div class="muted">No payment with this reference yet. Searched blocks ${v.fromBlock.toLocaleString("en-US")} to ${v.head.toLocaleString("en-US")}.</div>${maybe}${warn}${rows ? `<div class="muted" style="margin-top:6px">Other MUSD payments to this address</div><ul class="muted">${rows}</ul>` : ""}`;
 }
 
-interface InboxPayment { txHash: string; block: number; from: string; amount: string; memo: string | null }
-interface InboxAnswer { status: string; head: number; fromBlock: number; payments: InboxPayment[]; paid: InboxPayment | null; message?: string; error?: string }
+interface InboxPayment { txHash: string; block: number; from: string; amount: string; memo: string | null; possible?: boolean }
+interface InboxAnswer { status: string; head: number; fromBlock: number; clamped?: boolean; truncated?: boolean; payments: InboxPayment[]; paid: InboxPayment | null; message?: string; error?: string }
 
 async function watchPayment(chainId: number, to: string, amount: string, memo: string, fromBlock: number | null): Promise<void> {
   if (watchTimer !== null) clearTimeout(watchTimer);
@@ -170,9 +242,15 @@ async function watchPayment(chainId: number, to: string, amount: string, memo: s
     } catch {
       v = { status: "unavailable", head: 0, fromBlock: 0, payments: [], paid: null };
     }
-    if (v.status === "ok") out.innerHTML = renderInbox(v, chainId);
+    if (v.status === "ok") {
+      out.innerHTML = renderInbox(v, chainId);
+      if (v.paid) {
+        const inv = loadInvoices().find((x) => x.memo === memo && x.to === to && x.chainId === chainId);
+        if (inv) upsertInvoice({ ...inv, paidTx: v.paid.txHash });
+      }
+    }
     else out.innerHTML = `<div class="muted">${esc(v.message ?? v.error ?? "The network did not answer.")} Trying again.</div>`;
-    if (v.paid || Date.now() - started > 5 * 60_000) return;
+    if (v.paid || Date.now() - started > 15 * 60_000) return;
     watchTimer = window.setTimeout(() => void tick(), 8000);
   };
   out.innerHTML = `<div class="muted">Watching the MUSD contract for a transfer to ${esc(to)} with reference ${esc(memo)}...</div>`;
@@ -210,11 +288,12 @@ async function payWithWallet(): Promise<void> {
       void runBorrow();
       return;
     }
+    const sentAfter = await headBlock(chain.id);
     const hash = (await eth.request({ method: "eth_sendTransaction", params: [{ from, to: tx.to, value: "0x0", data: tx.data }] })) as string;
     status(`Sent. <a href="${chain.explorer}/tx/${esc(hash)}" target="_blank" rel="noopener">${esc(hash)}</a>. Waiting for the receipt...`);
     for (let i = 0; i < 30; i++) {
       await new Promise((res) => setTimeout(res, 3000));
-      const q = new URLSearchParams({ chain: String(chain.id), tx: hash, to: payment.recipient, amount: payment.amountText, memo: payment.memo ?? "" });
+      const q = new URLSearchParams({ chain: String(chain.id), tx: hash, to: payment.recipient, amount: payment.amountText, memo: payment.memo ?? "", from_block: sentAfter === null ? "" : String(sentAfter) });
       const v = (await (await fetch(`/api/verify?${q}`)).json()) as { status: string; confirmations?: number; message?: string };
       if (v.status === "paid") {
         status(`Confirmed on chain. ${esc(payment.amountText)} MUSD received, ${v.confirmations} confirmation(s). <a href="${chain.explorer}/tx/${esc(hash)}" target="_blank" rel="noopener">View in explorer</a>`);
@@ -316,7 +395,7 @@ async function runBorrow(): Promise<void> {
         <dt>Hard floor at MCR ${pct(BigInt(t.mcr))}</dt><dd>${btc(k.minCollateral)} BTC</dd>
         <dt>Liquidation price</dt><dd>${usd(k.liquidationPrice)} USD per BTC</dd>
         <dt>Interest</dt><dd>${(t.interestRateBps / 100).toString()}% a year fixed, about ${musd(k.yearlyInterest)} MUSD a year</dd>
-        <dt>System</dt><dd>${t.troves} troves, total ratio ${pct(BigInt(t.tcr))}, recovery mode ${t.recoveryMode ? "on" : "off"}</dd>
+        <dt>System</dt><dd>${t.troves} trove${t.troves === 1 ? "" : "s"}, total ratio ${pct(BigInt(t.tcr))}, recovery mode ${t.recoveryMode ? "on" : "off"}</dd>
       </dl>
       <ul class="muted">${k.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>
       <div class="actions"><a class="button" href="${esc(v.borrowAt)}" target="_blank" rel="noopener">Borrow MUSD in the Mezo app</a></div></div>`;
@@ -392,6 +471,8 @@ function init(): void {
   $("v-go").onclick = () => void runVerify();
   $("b-go").onclick = () => void runBorrow();
   $("m-memo").value = newMemo();
+  $("p-net").onchange = runCheck;
+  renderInvoices();
   const shared = new URLSearchParams(location.search).get("pay");
   if (shared) {
     $<HTMLTextAreaElement>("p-link").value = shared;

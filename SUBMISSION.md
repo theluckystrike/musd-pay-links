@@ -28,7 +28,7 @@ The payer side parses the link strictly. The token must be the MUSD contract for
 
 When the payer is short of MUSD, the page reads the MUSD protocol on Mezo. It reads the BTC price from PriceFeed, MCR, CCR, the minimum debt, the gas compensation and the fee from BorrowerOperations, the interest rate from InterestRateManager, and the system ratio and recovery mode from TroveManager. It then shows the BTC to lock, the debt, the liquidation price and a link to borrow in the Mezo app. The payer keeps the Bitcoin and pays in MUSD.
 
-The merchant inbox reads MUSD Transfer logs to the merchant address since the invoice block. It decodes the reference from each payment and marks the invoice paid when one carries the reference and covers the amount. The payer does not need to send a hash. A payment from before the invoice block is refused, so an old transfer cannot pay a new invoice.
+The merchant inbox reads MUSD Transfer logs to the merchant address since the invoice block. It decodes the reference from each payment and marks the invoice paid with the oldest payment that carries the reference and covers the amount. Each invoice gets a fresh random reference, so one payment pays one invoice. A payment of the exact amount without a reference shows as a possible match, because some wallets drop the reference. The payer does not need to send a hash. A payment from before the invoice block is refused, so an old transfer cannot pay a new invoice.
 
 How MUSD is used and positioned. MUSD is the only asset the product moves. It uses the MUSD token on both Mezo chains and four contracts of the MUSD protocol. The addresses come from the Mezo docs and the official deployment files in github.com/mezo-org/musd. The goal is to make MUSD easy to ask for, safe to pay, and easy to get for a Bitcoin holder who has none yet. Which wallets open these links has not been tested yet.
 
@@ -70,7 +70,7 @@ Testnet deployment. A live web app and JSON API on Cloudflare Workers read the M
 
 ## Evidence
 
-236 tests pass, 230 offline and 6 that read Mezo over RPC. They cover the guard's attack cases, the borrow quote rules, chunked log search, replay by block, the RPC fallback, CORS and the rate limit. Contract reads and `eth_call` dry runs are in `docs/evidence.json` in the repository.
+244 tests pass, 238 offline and 6 that read Mezo over RPC. They cover the guard's attack cases, the borrow quote rules, batched log search, replay by block, the RPC fallback, CORS and the rate limit. Contract reads and `eth_call` dry runs are in `docs/evidence.json` in the repository.
 
 ## What is next
 

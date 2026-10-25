@@ -73,6 +73,12 @@ pre, .mono { font: 12px/1.45 ui-monospace, Menlo, monospace; background: var(--c
 @media (max-width: 620px) { .chain-cards { grid-template-columns: 1fr; } }
 .muted { color: var(--muted); font-size: 13px; }
 .note { font-size: 13px; color: var(--muted); border-left: 3px solid var(--accent); padding-left: 10px; margin-top: 14px; }
+table.inv { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.inv th, table.inv td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+table.inv th { color: var(--muted); font-weight: 600; }
+td.mono-cell { font-family: ui-monospace, Menlo, monospace; word-break: break-all; }
+button.small { font-size: 12px; padding: 6px 9px; }
+h3.sub-h { font-size: 14px; margin: 20px 0 6px; }
 footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
 </style>
 </head>
@@ -114,6 +120,8 @@ footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
       </div>
       <div class="actions"><button id="m-go">Create link</button><button class="ghost" id="m-new">New invoice</button></div>
       <div class="out" id="m-out" aria-live="polite"></div>
+      <h3 class="sub-h">Your invoices in this browser</h3>
+      <div id="m-list"></div>
     </section>
 
     <section class="panel" aria-labelledby="p-h">
@@ -127,6 +135,8 @@ footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
         <div><label for="p-max">Your limit in MUSD</label><input id="p-max" inputmode="decimal" value="50"></div>
         <div><label for="p-check">Checksum</label>
           <select id="p-check"><option value="1">Required</option><option value="0">Not required</option></select></div>
+        <div><label for="p-net">Networks I accept</label>
+          <select id="p-net"><option value="31611">Mezo Testnet only</option><option value="31612">Mezo Mainnet only</option><option value="both">Both</option></select></div>
       </div>
       <label for="p-allow">Allowlist (optional, one address per line)</label>
       <textarea id="p-allow" spellcheck="false" style="min-height:56px"></textarea>
