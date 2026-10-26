@@ -4,6 +4,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { MEZO_MAINNET, MEZO_TESTNET } from "../src/chains.ts";
 import { buildTransferData } from "../src/guard.ts";
 import {
+  findDuplicatePayments,
   findPayments,
   rpcBatch,
   LOG_CHUNK,
@@ -397,6 +398,36 @@ describe("findPayments", () => {
     };
     const r = await findPayments(MEZO_TESTNET, { recipient: SHOP, memo: "INV-7", amount: 5n }, f);
     expect(r.status === "ok" && r.paid?.txHash).toBe(h(1));
+  });
+
+  it("lists further payments with the same reference as duplicates, newest first, without the recorded one", async () => {
+    const f = inbox(
+      [
+        { tx: h(1), block: HEAD - 30, value: 5n },
+        { tx: h(2), block: HEAD - 20, value: 5n },
+        { tx: h(3), block: HEAD - 2, value: 5n },
+        { tx: h(4), block: HEAD - 1, value: 5n },
+      ],
+      { [h(1)]: direct("INV-7", 5n), [h(2)]: direct("INV-7", 5n), [h(3)]: direct("INV-8", 5n), [h(4)]: direct("INV-7", 5n) },
+    );
+    const r = await findDuplicatePayments(MEZO_TESTNET, { recipient: SHOP, memo: "INV-7", paidBlock: HEAD - 30, paidTxHash: h(1) }, f);
+    expect(r.checked).toBe(true);
+    expect(r.duplicates.map((d) => d.txHash)).toEqual([h(4), h(2)]);
+    expect(r.duplicates[0]).toMatchObject({ block: HEAD - 1, from: PAYER, amount: "0.000000000000000005" });
+  });
+
+  it("does not call an empty duplicate list proof when the search was clamped", async () => {
+    const f = inbox([{ tx: h(1), block: HEAD - 30_000, value: 5n }], { [h(1)]: direct("INV-7", 5n) });
+    const r = await findDuplicatePayments(MEZO_TESTNET, { recipient: SHOP, memo: "INV-7", paidBlock: HEAD - 30_000, paidTxHash: h(1) }, f);
+    expect(r.checked).toBe(false);
+    expect(r.duplicates).toEqual([]);
+  });
+
+  it("reports an unreadable duplicate scan without hiding the paid invoice", async () => {
+    const f: Fetch = async () => {
+      throw new Error("down");
+    };
+    expect(await findDuplicatePayments(MEZO_TESTNET, { recipient: SHOP, memo: "INV-7", paidBlock: 1, paidTxHash: h(1) }, f)).toEqual({ checked: false, duplicates: [], fromBlock: null });
   });
 });
 

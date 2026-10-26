@@ -12,7 +12,7 @@ Payment links for MUSD
 
 ## TL;DR
 
-Merchants ask for MUSD with a signed invoice, a link, a QR code or a pay page in a chat. Payers check the link before they pay, the page will not let them pay twice, and a payer who is short of MUSD sees how much BTC would mint it.
+Merchants ask for MUSD with a signed invoice, a link, a QR code or a pay page in a chat. Payers check the link before they pay. The page blocks a second payment from the same browser and checks the chain again before it sends. Two payers can still race, so a later payment with the same reference is shown as a duplicate and a refund is due. A payer who is short of MUSD sees how much BTC would mint it.
 
 ## Short summary
 
@@ -28,7 +28,7 @@ The payer side parses the link strictly. The token must be the MUSD contract for
 
 When the payer is short of MUSD, the page reads the MUSD protocol on Mezo. It reads the BTC price from PriceFeed, MCR, CCR, the minimum debt, the gas compensation and the fee from BorrowerOperations, the interest rate from InterestRateManager, and the system ratio and recovery mode from TroveManager. It then shows the BTC to lock, the debt, the liquidation price and a link to the borrow page of the Mezo app. The payer keeps the Bitcoin and pays in MUSD.
 
-Checking an invoice reads MUSD Transfer logs to the merchant address since the invoice block. It decodes the reference from each payment and marks the invoice paid with the oldest payment that carries the exact reference and covers the amount. The payer does not need to send a hash. A transaction that paid one invoice cannot pay another. A payment from before the invoice block does not count. A payment of the exact amount without a reference shows as a possible match, because some wallets drop the reference. An invoice is recorded as paid only at 5 confirmations. Before that it shows as confirming, with the depth. The pay page is payer-only. It shows the amount, recipient, token, network, reference, status with confirmation depth, the QR code and the Pay action, and it hides the merchant panels. The pay page checks the chain when it opens and again right before it sends, and locks Pay when a payment for the invoice exists. A merchant can also record a payment by its hash, for example for an invoice older than the search window of about 23 hours. Invoices work on any device and expire after 30 days.
+Checking an invoice reads MUSD Transfer logs to the merchant address since the invoice block. It decodes the reference from each payment and marks the invoice paid with the oldest payment that carries the exact reference and covers the amount. The payer does not need to send a hash. A transaction that paid one invoice cannot pay another. A payment from before the invoice block does not count. A payment of the exact amount without a reference shows as a possible match, because some wallets drop the reference. An invoice is recorded as paid only at 5 confirmations. Before that it shows as confirming, with the depth. The pay page is payer-only. It shows the amount, recipient, token, network, reference, status with confirmation depth, the QR code and the Pay action, and it hides the merchant panels. The pay page checks the chain when it opens and again right before it sends. It blocks a second payment from the same browser, and it locks Pay when a payment for the invoice exists. Two payers can still race. When an invoice is paid, later transfers with the same reference are listed as duplicates, with their transaction hashes and a refund due. A merchant can also record a payment by its hash, for example for an invoice older than the search window of about 23 hours. Invoices work on any device and expire after 30 days.
 
 How MUSD is used and positioned. MUSD is the only asset the product moves. It uses the MUSD token on both Mezo chains and four contracts of the MUSD protocol. The addresses come from the Mezo docs and the official deployment files in github.com/mezo-org/musd. The goal is to make MUSD easy to ask for, safe to pay, and easy to get for a Bitcoin holder who has none yet. Which wallets open these links has not been tested yet.
 
@@ -86,7 +86,7 @@ The payments were sent from scripts. A browser wallet has not paid a link yet.
 
 ## Evidence
 
-304 tests pass, 297 offline and 7 that read Mezo over RPC. One of them verifies the project's own payment on chain. They cover the guard's attack cases, the borrow quote rules, invoices, signed creation (good signature, wrong signer, expired time, replay), the confirmation depth, confirm by hash, a double payment, batched log search, replay by block, the RPC fallback, CORS, the rate limit and the HTTP codes. Contract reads, `eth_call` dry runs and the project's own borrow and payment are in `docs/evidence.json` in the repository.
+337 tests pass, 330 offline and 7 that read Mezo over RPC. One of them verifies the project's own payment on chain. They cover the guard's attack cases, the borrow quote rules, invoices, signed creation (good signature, wrong signer, expired time, replay), the confirmation depth, confirm by hash, a double payment, batched log search, replay by block, the RPC fallback, CORS, the rate limit and the HTTP codes. Contract reads, `eth_call` dry runs and the project's own borrow and payment are in `docs/evidence.json` in the repository.
 
 ## What is next
 

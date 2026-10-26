@@ -9,7 +9,7 @@ import { CONFIRMATIONS_REQUIRED, type MezoChain } from "./chains.ts";
 import { type InvoiceClaims, type Paid } from "./claims.ts";
 import { type Reason } from "./eip681.ts";
 import { createPaymentLink } from "./merchant.ts";
-import { findPayments, verifyPayment, type Fetch, type FindResult } from "./rpc.ts";
+import { findDuplicatePayments, findPayments, verifyPayment, type DuplicatePayment, type Fetch, type FindResult } from "./rpc.ts";
 
 export interface KV {
   get(key: string): Promise<string | null>;
@@ -128,7 +128,14 @@ export interface PaymentRef {
 }
 
 export type InvoiceCheck =
-  | { status: "paid"; invoice: StoredInvoice }
+  | {
+      status: "paid";
+      invoice: StoredInvoice;
+      /** Further transfers with the same reference, already on chain. Each one is a refund due. */
+      duplicates?: DuplicatePayment[];
+      /** True when the duplicate scan covered every block from the recorded payment. */
+      duplicatesChecked?: boolean;
+    }
   /** A matching payment exists but is not deep enough yet. Nothing is recorded. The payer must not pay again. */
   | { status: "confirming"; invoice: StoredInvoice; payment: PaymentRef; confirmations: number; required: number; inbox?: Extract<FindResult, { status: "ok" }> }
   | { status: "open"; invoice: StoredInvoice; inbox: Extract<FindResult, { status: "ok" }> }
@@ -162,6 +169,17 @@ async function recordPaid(kv: KV, chainId: number, invoice: StoredInvoice, p: Pa
   return result;
 }
 
+/** A paid invoice plus the later payments with the same reference, so a merchant sees a refund due. */
+async function paidWithDuplicates(chain: MezoChain, invoice: StoredInvoice, fetchImpl?: Fetch): Promise<Extract<InvoiceCheck, { status: "paid" }>> {
+  if (!invoice.paid) return { status: "paid", invoice };
+  const scan = await findDuplicatePayments(
+    chain,
+    { recipient: invoice.to, memo: invoice.memo, paidBlock: invoice.paid.block, paidTxHash: invoice.paid.txHash },
+    fetchImpl,
+  );
+  return { status: "paid", invoice, duplicates: scan.duplicates, duplicatesChecked: scan.checked };
+}
+
 /**
  * Look for the payment of an open invoice on chain and record it once found and at least
  * CONFIRMATIONS_REQUIRED blocks deep. A transaction that is already recorded for another invoice is
@@ -169,7 +187,7 @@ async function recordPaid(kv: KV, chainId: number, invoice: StoredInvoice, p: Pa
  * "confirming", so a pay page can lock the Pay button before the invoice is recorded.
  */
 export async function checkInvoice(kv: KV, chain: MezoChain, invoice: StoredInvoice, fetchImpl?: Fetch, now: Date = new Date(), claims?: InvoiceClaims): Promise<InvoiceCheck> {
-  if (invoice.paid) return { status: "paid", invoice };
+  if (invoice.paid) return await paidWithDuplicates(chain, invoice, fetchImpl);
   const inbox = await findPayments(chain, { recipient: invoice.to, fromBlock: invoice.fromBlock, memo: invoice.memo, amount: BigInt(invoice.units) }, fetchImpl);
   if (inbox.status !== "ok") return { status: "unavailable", invoice, message: inbox.message };
   const candidates = [...inbox.payments].reverse().filter((p) => p.matches === true); // oldest first
@@ -181,7 +199,7 @@ export async function checkInvoice(kv: KV, chain: MezoChain, invoice: StoredInvo
     if (confirmations < CONFIRMATIONS_REQUIRED) return { status: "confirming", invoice, payment: ref, confirmations, required: CONFIRMATIONS_REQUIRED, inbox };
     const recorded = await recordPaid(kv, chain.id, invoice, ref, now, claims);
     if (recorded.status === "tx_used") continue; // another invoice claimed it between the read and the write
-    return { status: "paid", invoice: recorded.invoice };
+    return await paidWithDuplicates(chain, recorded.invoice, fetchImpl);
   }
   return { status: "open", invoice, inbox };
 }

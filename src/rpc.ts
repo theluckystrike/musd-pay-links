@@ -380,6 +380,42 @@ export async function findPayments(chain: MezoChain, input: FindInput, fetchImpl
   }
 }
 
+export interface DuplicatePayment {
+  txHash: string;
+  block: number;
+  from: string;
+  amount: string;
+}
+
+export interface DuplicateScan {
+  /** False when the search could not cover every block from the paid transaction, so "no duplicates" is not proven. */
+  checked: boolean;
+  /** Payments after the recorded one that carry the same reference. Newest first. */
+  duplicates: DuplicatePayment[];
+  /** Block the scan started from, null when the chain did not answer. */
+  fromBlock: number | null;
+}
+
+/**
+ * Find further payments with the reference of an already paid invoice. It uses the same log search as
+ * the merchant inbox, starting at the recorded payment block, and keeps only transactions with the
+ * exact reference other than the recorded one. A clamped or truncated search says checked=false, so
+ * the merchant does not read an empty list as proof that no duplicate exists.
+ */
+export async function findDuplicatePayments(
+  chain: MezoChain,
+  input: { recipient: string; memo: string; paidBlock: number; paidTxHash: string },
+  fetchImpl?: Fetch,
+): Promise<DuplicateScan> {
+  const r = await findPayments(chain, { recipient: input.recipient, fromBlock: input.paidBlock, memo: input.memo, amount: 0n }, fetchImpl);
+  if (r.status !== "ok") return { checked: false, duplicates: [], fromBlock: null };
+  const paid = input.paidTxHash.toLowerCase();
+  const duplicates = r.payments
+    .filter((p) => p.memo === input.memo && p.txHash.toLowerCase() !== paid)
+    .map((p) => ({ txHash: p.txHash, block: p.block, from: p.from, amount: p.amount }));
+  return { checked: !r.clamped && !r.truncated, duplicates, fromBlock: r.fromBlock };
+}
+
 /** Read transactions in batches. A lagging node can answer null, so null items are asked again, up to 3 rounds. */
 async function readTransactions(chain: MezoChain, hashes: string[], fetchImpl?: Fetch): Promise<({ input: string; to: string | null } | null)[]> {
   const out: ({ input: string; to: string | null } | null)[] = hashes.map(() => null);

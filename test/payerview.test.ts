@@ -122,3 +122,27 @@ describe("payer-only page", () => {
     expect(html).toContain('id="pv-unlock" type="button"');
   });
 });
+
+describe("double-pay texts", () => {
+  const html = readFileSync(new URL("../web/public/index.html", import.meta.url), "utf8");
+  const client = readFileSync(new URL("../web/client.ts", import.meta.url), "utf8");
+  const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+  const submission = readFileSync(new URL("../SUBMISSION.md", import.meta.url), "utf8");
+
+  it("says on the pay page that the browser is blocked, the chain is checked again and two payers can race", () => {
+    expect(html).toContain("blocks a second payment from this browser");
+    expect(html).toContain("checks the chain when it opens and again before it sends");
+    expect(html).toContain("Two payers can still race");
+    expect(html).toContain("duplicate");
+    expect(client).toContain("This invoice was already paid. Contact the merchant for a refund.");
+    expect(client).toContain("duplicate payment(s), refund due");
+  });
+
+  it("does not promise that no one can pay twice, in the README or the submission", () => {
+    for (const text of [readme, submission]) {
+      expect(text).not.toContain("will not let them pay twice");
+      expect(text).toContain("Two payers can still race");
+      expect(text).toContain("duplicate");
+    }
+  });
+});

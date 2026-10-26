@@ -99,6 +99,7 @@ footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
 
   <section class="panel wide" id="payer-view" aria-labelledby="pv-h" hidden>
     <h2 id="pv-h">Pay this invoice</h2>
+    <p class="sub">This page checks the chain when it opens and again before it sends. It blocks a second payment from this browser. Two payers can still race. A later payment with the same reference is shown as a duplicate, and a refund is due.</p>
     <dl class="kv" id="pv-summary">
       <dt>Amount</dt><dd id="pv-amount"></dd>
       <dt>Recipient</dt><dd id="pv-recipient"></dd>

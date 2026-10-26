@@ -225,6 +225,29 @@ describe("double payment", () => {
     expect(other.status).toBe("not_found");
   });
 
+  it("lists a later payment with the same reference as a duplicate and a refund due", async () => {
+    const kv = memKV();
+    const r = await createInvoice(kv, MEZO_TESTNET, { to: SHOP, amount: "5", memo: "INV-2D" }, HEAD - 1000);
+    if (!r.ok) throw new Error("expected ok");
+    const f = chainWith([
+      { tx: h(24), block: HEAD - 500, units: 5n * E, memo: "INV-2D" },
+      { tx: h(25), block: HEAD - 20, units: 5n * E, memo: "INV-2D" },
+      { tx: h(26), block: HEAD - 10, units: 5n * E, memo: "INV-OTHER" },
+    ]);
+    const c = await checkInvoice(kv, MEZO_TESTNET, r.invoice, f);
+    expect(c.status).toBe("paid");
+    if (c.status !== "paid") return;
+    expect(c.invoice.paid?.txHash).toBe(h(24));
+    expect(c.duplicatesChecked).toBe(true);
+    expect(c.duplicates).toEqual([{ txHash: h(25), block: HEAD - 20, from: PAYER, amount: "5" }]);
+    // The paid answer stands when the duplicate scan cannot read the chain.
+    const offline: Fetch = async () => {
+      throw new Error("no network");
+    };
+    const again = await checkInvoice(kv, MEZO_TESTNET, c.invoice, offline);
+    expect(again).toMatchObject({ status: "paid", duplicates: [], duplicatesChecked: false });
+  });
+
   it("locks Pay while the first payment is still shallow", async () => {
     const kv = memKV();
     const r = await createInvoice(kv, MEZO_TESTNET, { to: SHOP, amount: "5", memo: "INV-2Y" }, HEAD - 1000);
@@ -320,6 +343,24 @@ describe("invoice routes", () => {
       expect(((await (await call(e, "/api/invoices/INV-W?chain=31611")).json()) as { status: string }).status).toBe("paid");
       // The store-only answer says it was not checked on chain.
       expect(((await (await call(e, "/api/invoices/INV-W?chain=31611&check=0")).json()) as { checked: boolean }).checked).toBe(false);
+    });
+
+    it("lists a duplicate payment with its hash and explorer on the invoice API", async () => {
+      const e = env();
+      await createInvoice(e.INVOICES, MEZO_TESTNET, { to: SHOP, amount: "5", memo: "INV-DUP" }, HEAD - 100);
+      vi.stubGlobal("fetch", chainWith([
+        { tx: h(71), block: HEAD - 50, units: 5n * E, memo: "INV-DUP" },
+        { tx: h(72), block: HEAD - 20, units: 5n * E, memo: "INV-DUP" },
+      ]));
+      const res = await call(e, "/api/invoices/INV-DUP?chain=31611");
+      const body = (await res.json()) as { status: string; duplicatesChecked: boolean; duplicates: { txHash: string; block: number; from: string; amount: string; explorer: string }[] };
+      expect(res.status).toBe(200);
+      expect(body).toMatchObject({
+        status: "paid",
+        duplicatesChecked: true,
+        duplicates: [{ txHash: h(72), block: HEAD - 20, from: PAYER, amount: "5" }],
+      });
+      expect(body.duplicates[0]!.explorer).toBe(`${MEZO_TESTNET.explorer}/tx/${h(72)}`);
     });
 
     it("POST /api/invoices/:memo/confirm records the payment and validates its input", async () => {

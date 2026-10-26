@@ -153,8 +153,11 @@ interface ServerInvoice {
 interface InvoiceAnswer {
   status: string; checked?: boolean; http?: number; partial?: InboxPayment[]; invoice?: ServerInvoice; possible?: InboxPayment[]; clamped?: boolean; truncated?: boolean; head?: number; message?: string; error?: string;
   reasons?: { code: string; message: string }[]; payment?: InboxPayment & { explorer?: string }; confirmations?: number; required?: number;
+  /** Later transfers with the same reference on a paid invoice. Each one is a duplicate and a refund is due. */
+  duplicates?: DuplicatePayment[]; duplicatesChecked?: boolean;
 }
 interface InboxPayment { txHash: string; block: number; from: string; amount: string; memo: string | null; possible?: boolean | null }
+interface DuplicatePayment { txHash: string; block: number; from: string; amount: string; explorer?: string }
 
 let memoEdited = false;
 
@@ -300,9 +303,16 @@ function renderInvoiceAnswer(a: InvoiceAnswer): string {
   const inv = a.invoice;
   if (a.status === "paid" && inv?.paid) {
     const how = inv.paid.referenceMissing ? "without the reference, accepted by the recipient" : `with reference ${esc(inv.memo)}`;
+    const dups = a.duplicates ?? [];
+    const refunds = dups.length
+      ? `<div class="verdict bad" style="margin-top:8px"><strong>${dups.length} duplicate payment(s), refund due.</strong> These transfers carry reference ${esc(inv.memo)} after the recorded payment. Refund them to their payers.
+      <ul>${dups.map((x) => `<li>${esc(x.amount)} MUSD from ${esc(x.from)} in block ${x.block}. <a href="${esc(x.explorer ?? "")}" target="_blank" rel="noopener">${esc(x.txHash)}</a></li>`).join("")}</ul></div>`
+      : a.duplicatesChecked === false
+        ? `<div class="note">The duplicate check did not cover every block from the recorded payment, so an empty list is not proof that no duplicate exists.</div>`
+        : `<div class="note">No later transfer with this reference in the blocks searched.</div>`;
     return `<div class="verdict ok"><strong>Paid. ${esc(inv.paid.amount)} MUSD ${how}.</strong>
       <dl class="kv"><dt>From</dt><dd>${esc(inv.paid.from)}</dd><dt>Block</dt><dd>${inv.paid.block}</dd>
-      <dt>Transaction</dt><dd><a href="${esc(inv.explorer ?? "")}" target="_blank" rel="noopener">${esc(inv.paid.txHash)}</a></dd></dl></div>`;
+      <dt>Transaction</dt><dd><a href="${esc(inv.explorer ?? "")}" target="_blank" rel="noopener">${esc(inv.paid.txHash)}</a></dd></dl></div>${refunds}`;
   }
   if (a.status === "confirming" && a.payment) {
     return `<div class="verdict ok"><strong>Payment found. ${esc(String(a.confirmations))} of ${esc(String(a.required))} confirmations.</strong> The invoice is recorded as paid at ${esc(String(a.required))} confirmations, about 20 seconds.
@@ -458,6 +468,15 @@ async function lockIfSentHere(chainId: number, memo: string, a: InvoiceAnswer): 
   if (!sent || !a.invoice) return false;
   const hash = sent.hash;
   const chain = chainById(chainId)!;
+  const duplicate = (a.duplicates ?? []).find((x) => x.txHash.toLowerCase() === hash.toLowerCase());
+  if (duplicate) {
+    // This browser sent the payment, and the invoice was already paid by an earlier transaction.
+    payLock = "This invoice was already paid. Contact the merchant for a refund.";
+    $("pay-banner").innerHTML = `<strong>This invoice was already paid. Contact the merchant for a refund.</strong> Your payment <a href="${chain.explorer}/tx/${esc(hash)}" target="_blank" rel="noopener">${esc(hash)}</a> is a duplicate. Do not pay again.`;
+    setPayerStatus("This invoice was already paid. Contact the merchant for a refund.");
+    setPayButton();
+    return true;
+  }
   const showReferenceMissing = () => {
     payLock = "Sent. Reference missing. The merchant will confirm.";
     $("pay-banner").innerHTML = `<strong>Sent. Reference missing. The merchant will confirm.</strong> The transfer succeeded to the invoice recipient. The wallet dropped the reference bytes. Do not pay again. <a href="${chain.explorer}/tx/${esc(hash)}" target="_blank" rel="noopener">See the payment</a>.
@@ -670,13 +689,15 @@ async function followPayment(hash: string, payment: { recipient: string; amountT
     }
     if (v.status === "paid" && v.final === true) {
       let rec = "";
+      let refund = false;
       if (payInvoice) {
         const c = await confirmByHash(payInvoice.chainId, payInvoice.memo, hash);
+        refund = c.status === "already_paid";
         rec = c.status === "paid" ? ` Invoice ${esc(payInvoice.memo)} is recorded as paid.`
-          : c.status === "already_paid" ? ` <strong>The invoice was already paid by another transaction, so this is a second payment.</strong> Ask the merchant for a refund.`
+          : refund ? ` <strong>This invoice was already paid. Contact the merchant for a refund.</strong> Your payment is a duplicate and does not count for the invoice.`
           : ` The invoice is not recorded yet (${esc(c.message ?? c.status)}). It is recorded on the next check, or the merchant can record it by hash.`;
       }
-      setPayerStatus("Paid. Do not pay it again.");
+      setPayerStatus(refund ? "This invoice was already paid. Contact the merchant for a refund." : "Paid. Do not pay it again.");
       status(`Confirmed on chain. ${esc(payment.amountText)} MUSD received, ${v.confirmations} confirmations. ${link}.${rec}`);
       return;
     }

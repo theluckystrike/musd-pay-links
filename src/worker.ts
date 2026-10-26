@@ -235,7 +235,12 @@ async function invoices(req: Request, url: URL, env: Env): Promise<Response> {
   if (p.get("check") === "0") return json({ status: inv.paid ? "paid" : "open", invoice: publicInvoice(inv, url.origin), checked: false });
   const c = await checkInvoice(kv, chain, inv, undefined, new Date(), claims);
   const extra =
-    c.status === "open" ? {
+    c.status === "paid" ? {
+      // A later transfer with the same reference is a duplicate. The money arrived twice, so a refund is due.
+      duplicates: (c.duplicates ?? []).map((d) => ({ ...d, explorer: `${chain.explorer}/tx/${d.txHash}` })),
+      duplicatesChecked: c.duplicatesChecked === true,
+    }
+    : c.status === "open" ? {
       clamped: c.inbox.clamped,
       truncated: c.inbox.truncated,
       possible: c.inbox.payments.filter((x) => x.possible === true).map(({ amountUnits: _u, ...x }) => x),
