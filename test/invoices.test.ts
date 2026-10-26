@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { CONFIRMATIONS_REQUIRED, MEZO_TESTNET } from "../src/chains.ts";
 import { buildTransferData } from "../src/guard.ts";
-import { checkInvoice, confirmInvoice, createInvoice, getInvoice, listInvoices, MAX_LISTED, newReference, type KV } from "../src/invoices.ts";
+import { acceptPossibleInvoice, checkInvoice, confirmInvoice, createInvoice, getInvoice, listInvoices, MAX_LISTED, newReference, type KV } from "../src/invoices.ts";
 import { payPageLock } from "../src/paystate.ts";
 import { MEMO_PATTERN } from "../src/eip681.ts";
 import { retry, TRANSFER_TOPIC, type Fetch } from "../src/rpc.ts";
@@ -300,7 +300,7 @@ describe("invoice routes", () => {
   });
 
   it("maps answer states to HTTP codes", () => {
-    expect([statusCode("paid"), statusCode("pending"), statusCode("open"), statusCode("confirming"), statusCode("not_found"), statusCode("mismatch"), statusCode("failed"), statusCode("unavailable"), statusCode("tx_used")]).toEqual([200, 200, 200, 200, 404, 422, 422, 503, 409]);
+    expect([statusCode("paid"), statusCode("paid_no_memo"), statusCode("pending"), statusCode("open"), statusCode("confirming"), statusCode("not_found"), statusCode("mismatch"), statusCode("failed"), statusCode("not_possible"), statusCode("unavailable"), statusCode("tx_used")]).toEqual([200, 200, 200, 200, 200, 404, 422, 422, 422, 503, 409]);
   });
 
   describe("with a fake chain behind the Worker", () => {
@@ -379,5 +379,68 @@ describe("invoice routes", () => {
       expect(none.status).toBe("not_found");
       expect(none.final).toBe(false);
     });
+  });
+});
+
+describe("accept a possible payment without the reference", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const setup = async (memo = "INV-ACC", amount = "5") => {
+    const kv = memKV();
+    const r = await createInvoice(kv, MEZO_TESTNET, { to: SHOP, amount, memo }, HEAD - 100);
+    if (!r.ok) throw new Error("expected ok");
+    return { kv, inv: r.invoice };
+  };
+
+  it("records a no-reference payment of the exact amount with referenceMissing", async () => {
+    const { kv, inv } = await setup();
+    const f = chainWith([{ tx: h(9), block: HEAD - 5, units: 5n * E, memo: null }]);
+    const c = await acceptPossibleInvoice(kv, MEZO_TESTNET, inv, h(9), f);
+    expect(c.status).toBe("paid");
+    expect(c.invoice.paid).toMatchObject({ txHash: h(9), block: HEAD - 5, from: PAYER, amount: "5", referenceMissing: true });
+    expect((await getInvoice(kv, MEZO_TESTNET.id, "INV-ACC"))!.paid?.referenceMissing).toBe(true);
+    expect(kv.data.get(`tx:31611:${h(9)}`)).toBe("INV-ACC");
+  });
+
+  it("does not accept a transaction that carries the reference", async () => {
+    const { kv, inv } = await setup();
+    const f = chainWith([{ tx: h(9), block: HEAD - 5, units: 5n * E, memo: "INV-ACC" }]);
+    const c = await acceptPossibleInvoice(kv, MEZO_TESTNET, inv, h(9), f);
+    expect(c.status).toBe("not_possible");
+    if (c.status === "not_possible") expect(c.message).toContain("carries the reference");
+    expect((await getInvoice(kv, MEZO_TESTNET.id, "INV-ACC"))!.paid).toBeUndefined();
+  });
+
+  it("requires the exact invoice amount", async () => {
+    const { kv, inv } = await setup();
+    const f = chainWith([{ tx: h(9), block: HEAD - 5, units: 6n * E, memo: null }]);
+    const c = await acceptPossibleInvoice(kv, MEZO_TESTNET, inv, h(9), f);
+    expect(c.status).toBe("mismatch");
+    if (c.status === "mismatch") expect(c.message).toContain("not the invoice amount");
+  });
+
+  it("reports a shallow possible payment as confirming and records nothing", async () => {
+    const { kv, inv } = await setup();
+    const f = chainWith([{ tx: h(9), block: HEAD - 2, units: 5n * E, memo: null }]);
+    const c = await acceptPossibleInvoice(kv, MEZO_TESTNET, inv, h(9), f);
+    expect(c).toMatchObject({ status: "confirming", confirmations: 3, required: 5, payment: { txHash: h(9), referenceMissing: true } });
+    expect((await getInvoice(kv, MEZO_TESTNET.id, "INV-ACC"))!.paid).toBeUndefined();
+  });
+
+  it("refuses a transaction that already paid another invoice", async () => {
+    const { kv, inv } = await setup();
+    await kv.put(`tx:31611:${h(9)}`, "INV-OTHER");
+    const f = chainWith([{ tx: h(9), block: HEAD - 5, units: 5n * E, memo: null }]);
+    const c = await acceptPossibleInvoice(kv, MEZO_TESTNET, inv, h(9), f);
+    expect(c).toMatchObject({ status: "tx_used" });
+    expect((await getInvoice(kv, MEZO_TESTNET.id, "INV-ACC"))!.paid).toBeUndefined();
+  });
+
+  it("reports a second no-reference payment of an already paid invoice as already_paid", async () => {
+    const { kv, inv } = await setup();
+    const paid = { txHash: h(8), block: HEAD - 20, from: PAYER, amount: "5", at: new Date().toISOString() };
+    const f = chainWith([{ tx: h(9), block: HEAD - 5, units: 5n * E, memo: null }]);
+    const c = await acceptPossibleInvoice(kv, MEZO_TESTNET, { ...inv, paid }, h(9), f);
+    expect(c.status).toBe("already_paid");
+    if (c.status === "already_paid") expect(c.message).toContain(h(8));
   });
 });

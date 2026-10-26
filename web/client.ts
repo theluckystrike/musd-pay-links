@@ -3,13 +3,13 @@
 import { getAddress, stringToHex } from "viem";
 
 import { formatAmount, parseAmount } from "../src/amount.ts";
-import { invoiceMessage } from "../src/auth.ts";
+import { acceptMessage, invoiceMessage } from "../src/auth.ts";
 import { pct } from "../src/borrow.ts";
 import { chainById, CONFIRMATIONS_REQUIRED, MEZO_TESTNET } from "../src/chains.ts";
 import { checkPaymentLink, type CheckResult } from "../src/guard.ts";
 import { createPaymentLink } from "../src/merchant.ts";
 import { payPageLock } from "../src/paystate.ts";
-import { MERCHANT_ELEMENT_IDS, payerStatus, payerSummary } from "../src/payerview.ts";
+import { MERCHANT_ELEMENT_IDS, payerMaxAmount, payerStatus, payerSummary } from "../src/payerview.ts";
 import { newReference } from "../src/invoices.ts";
 import { qrSvg } from "../src/qr.ts";
 
@@ -50,7 +50,7 @@ const EXAMPLES: [string, string][] = [
 
 let lastCheck: CheckResult | null = null;
 /** The invoice behind a pay page (/?invoice=...), or null for a plain link. */
-let payInvoice: { chainId: number; memo: string; to?: string; units?: string } | null = null;
+let payInvoice: { chainId: number; memo: string; to?: string; units?: string; amount?: string } | null = null;
 /** true from the first click on Pay until the attempt ends. A second click while the wallet window is open does nothing. */
 let paying = false;
 /** Why Pay is locked, or null. A pay page locks Pay when the chain shows a matching payment, or when it cannot tell. */
@@ -94,6 +94,7 @@ function fillPayerSummary(inv: ServerInvoice): void {
   $("pv-token").innerHTML = chain ? `<a href="${chain.explorer}/token/${s.token}" target="_blank" rel="noopener">MUSD ${esc(s.token)}</a>` : esc(s.token);
   $("pv-network").textContent = s.network;
   $("pv-memo").textContent = s.reference;
+  $("pv-limit").textContent = `Your limit is the invoice amount, ${s.amount}.`;
   const qr = $("pv-qr");
   qr.innerHTML = qrSvg(inv.link);
   qr.setAttribute("aria-label", s.qrLabel);
@@ -123,9 +124,12 @@ function runCheck(): void {
   const link = $<HTMLTextAreaElement>("p-link").value;
   const allow = $<HTMLTextAreaElement>("p-allow").value.split(/\s+/).filter(Boolean);
   const net = $<HTMLSelectElement>("p-net").value;
+  // On an invoice page the payer sees the amount and confirms it. The hidden merchant default of 50
+  // must not decide whether a larger invoice can be paid.
+  const maxAmount = isPayerView() && payInvoice?.amount ? payerMaxAmount({ amount: payInvoice.amount }) : $("p-max").value.trim();
   const r = checkPaymentLink(link, {
     allowedChains: net === "both" ? undefined : [Number(net)],
-    maxAmount: $("p-max").value.trim(),
+    maxAmount,
     allowlist: allow.length ? allow : undefined,
     requireChecksum: $<HTMLSelectElement>("p-check").value === "1",
   });
@@ -144,7 +148,7 @@ function runCheck(): void {
 // Invoices live in the Worker's KV store, so they survive a reload and work on another device.
 interface ServerInvoice {
   chainId: number; to: string; amount: string; units: string; memo: string; fromBlock: number; createdAt: string; link: string;
-  payUrl: string; explorer: string | null; signed?: boolean; paid?: { txHash: string; block: number; from: string; amount: string };
+  payUrl: string; explorer: string | null; signed?: boolean; paid?: { txHash: string; block: number; from: string; amount: string; referenceMissing?: true };
 }
 interface InvoiceAnswer {
   status: string; checked?: boolean; http?: number; partial?: InboxPayment[]; invoice?: ServerInvoice; possible?: InboxPayment[]; clamped?: boolean; truncated?: boolean; head?: number; message?: string; error?: string;
@@ -295,7 +299,8 @@ async function runCreate(fillVerify = true): Promise<void> {
 function renderInvoiceAnswer(a: InvoiceAnswer): string {
   const inv = a.invoice;
   if (a.status === "paid" && inv?.paid) {
-    return `<div class="verdict ok"><strong>Paid. ${esc(inv.paid.amount)} MUSD with reference ${esc(inv.memo)}.</strong>
+    const how = inv.paid.referenceMissing ? "without the reference, accepted by the recipient" : `with reference ${esc(inv.memo)}`;
+    return `<div class="verdict ok"><strong>Paid. ${esc(inv.paid.amount)} MUSD ${how}.</strong>
       <dl class="kv"><dt>From</dt><dd>${esc(inv.paid.from)}</dd><dt>Block</dt><dd>${inv.paid.block}</dd>
       <dt>Transaction</dt><dd><a href="${esc(inv.explorer ?? "")}" target="_blank" rel="noopener">${esc(inv.paid.txHash)}</a></dd></dl></div>`;
   }
@@ -306,11 +311,12 @@ function renderInvoiceAnswer(a: InvoiceAnswer): string {
   if (a.status !== "open") return `<div class="muted">${esc(a.message ?? a.error ?? a.status)} Trying again.</div>`;
   const possible = a.possible ?? [];
   const maybe = possible.length
-    ? `<div class="verdict bad" style="margin-top:8px"><strong>Possible match. ${possible.length} payment(s) of exactly this amount arrived without a reference.</strong> Some wallets drop the reference. Ask the payer which one is theirs, then confirm it by hash in panel 3.</div>`
+    ? `<div class="verdict bad" style="margin-top:8px"><strong>Possible match. ${possible.length} payment(s) of exactly this amount arrived without a reference.</strong> Some wallets drop the reference. Ask the payer which one is theirs, then accept it as the invoice recipient.
+      <ul>${possible.map((x) => `<li>${esc(x.amount)} MUSD from ${esc(x.from)} in block ${x.block}. <button class="ghost small accept-possible" type="button" data-tx="${esc(x.txHash)}">Accept this payment</button></li>`).join("")}</ul></div>`
     : "";
   const warn = [
-    a.clamped ? "The invoice is older than the search window (about 23 hours), so earlier blocks were not searched. Confirm by hash in panel 3." : "",
-    a.truncated ? "This address receives many payments. Only the newest 50 were read. Confirm by hash in panel 3." : "",
+    a.clamped ? "The invoice is older than the search window (about 23 hours), so earlier blocks were not searched. Record the hash in panel 3, or accept it as the invoice recipient." : "",
+    a.truncated ? "This address receives many payments. Only the newest 50 were read. Record the hash in panel 3, or accept it as the invoice recipient." : "",
   ].filter(Boolean).map((w) => `<div class="note">${esc(w)}</div>`).join("");
   return `<div class="muted">No payment with reference ${esc(inv?.memo ?? "")} yet. Searched up to block ${(a.head ?? 0).toLocaleString("en-US")}.</div>${maybe}${warn}`;
 }
@@ -323,6 +329,18 @@ async function watchInvoice(chainId: number, memo: string): Promise<void> {
   const tick = async () => {
     const a = await fetchInvoice(chainId, memo, true);
     out.innerHTML = renderInvoiceAnswer(a);
+    const to = a.invoice?.to;
+    if (to) {
+      out.querySelectorAll<HTMLButtonElement>(".accept-possible").forEach((b) => {
+        b.onclick = async () => {
+          const tx = b.dataset.tx;
+          if (!tx) return;
+          b.disabled = true;
+          b.textContent = "Signing...";
+          await acceptPossible(chainId, memo, tx, to);
+        };
+      });
+    }
     if (a.status === "paid") {
       void loadInvoices();
       return;
@@ -437,9 +455,24 @@ function writeSent(chainId: number, memo: string, hash: string | null): void {
  */
 async function lockIfSentHere(chainId: number, memo: string, a: InvoiceAnswer): Promise<boolean> {
   const sent = readSent(chainId, memo);
-  if (!sent || !a.invoice || payPageLock(withoutAcknowledged(a)) !== null) return false;
+  if (!sent || !a.invoice) return false;
   const hash = sent.hash;
   const chain = chainById(chainId)!;
+  const showReferenceMissing = () => {
+    payLock = "Sent. Reference missing. The merchant will confirm.";
+    $("pay-banner").innerHTML = `<strong>Sent. Reference missing. The merchant will confirm.</strong> The transfer succeeded to the invoice recipient. The wallet dropped the reference bytes. Do not pay again. <a href="${chain.explorer}/tx/${esc(hash)}" target="_blank" rel="noopener">See the payment</a>.
+      <div class="actions"><button class="ghost small" id="pay-recheck" type="button">Check again</button></div>`;
+    setPayerStatus("Sent. Reference missing. The merchant will confirm. Do not pay again.");
+    const b = document.getElementById("pay-recheck");
+    if (b) b.onclick = () => void loadPayInvoice(chainId, memo);
+    setPayButton();
+  };
+  // The invoice check already lists this hash as a possible payment. It succeeded without the reference.
+  if ((a.possible ?? []).some((x) => x.txHash.toLowerCase() === hash.toLowerCase())) {
+    showReferenceMissing();
+    return true;
+  }
+  if (payPageLock(withoutAcknowledged(a)) !== null) return false;
   try {
     const q = new URLSearchParams({ chain: String(chainId), tx: hash, to: a.invoice.to, amount: a.invoice.amount, memo, from_block: String(a.invoice.fromBlock) });
     const v = (await (await fetch(`/api/verify?${q}`)).json()) as { status?: string };
@@ -447,6 +480,10 @@ async function lockIfSentHere(chainId: number, memo: string, a: InvoiceAnswer): 
     if (v.status === "failed" || v.status === "mismatch" || dropped) {
       writeSent(chainId, memo, null);
       return false;
+    }
+    if (v.status === "paid_no_memo") {
+      showReferenceMissing();
+      return true;
     }
   } catch {
     // Keep the lock when the check fails.
@@ -469,7 +506,7 @@ async function loadPayInvoice(chainId: number, memo: string): Promise<InvoiceAns
   $("pay-banner").innerHTML = `<strong>Checking the chain for a payment of invoice ${esc(memo)}...</strong>`;
   const a = await fetchInvoice(chainId, memo, true);
   if (a.invoice) {
-    payInvoice = { chainId, memo, to: a.invoice.to, units: a.invoice.units };
+    payInvoice = { chainId, memo, to: a.invoice.to, units: a.invoice.units, amount: a.invoice.amount };
     $<HTMLSelectElement>("p-net").value = String(chainId);
     $<HTMLTextAreaElement>("p-link").value = a.invoice.link;
     fillPayerSummary(a.invoice);
@@ -478,6 +515,39 @@ async function loadPayInvoice(chainId: number, memo: string): Promise<InvoiceAns
   await lockIfSentHere(chainId, memo, a);
   if (a.invoice) runCheck();
   return a;
+}
+
+async function acceptPossible(chainId: number, memo: string, tx: string, to: string): Promise<void> {
+  const out = $("m-watch-out");
+  const eth = (window as unknown as { ethereum?: Eip1193 }).ethereum;
+  if (!eth) {
+    out.innerHTML = `<div class="verdict bad"><strong>Accepting a payment needs a browser wallet that holds the invoice recipient address.</strong> The wallet signs a message. It sends no transaction and costs nothing.</div>`;
+    return;
+  }
+  try {
+    const [account] = (await eth.request({ method: "eth_requestAccounts" })) as string[];
+    if (!account || account.toLowerCase() !== to.toLowerCase()) {
+      throw new Error(`Connect the wallet of the invoice recipient ${to}. Your wallet is ${account ? getAddress(account) : "not connected"}.`);
+    }
+    const timestamp = Math.floor(Date.now() / 1000);
+    const claim = { chainId, to: to as `0x${string}`, memo, txHash: tx, timestamp };
+    out.innerHTML = `<div class="muted">Sign the accept message in your wallet. It is a message, not a transaction.</div>`;
+    const signature = (await eth.request({ method: "personal_sign", params: [stringToHex(acceptMessage(claim)), account] })) as string;
+    const res = await fetch(`/api/invoices/${encodeURIComponent(memo)}/accept?chain=${chainId}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tx, timestamp, signature }),
+    });
+    const result = (await res.json()) as InvoiceAnswer;
+    if (result.status === "paid" || result.status === "confirming") {
+      out.innerHTML = renderInvoiceAnswer(result);
+      if (result.status === "paid") void loadInvoices();
+    } else {
+      out.innerHTML = `<div class="verdict bad"><strong>Not accepted.</strong> ${esc(result.message ?? result.error ?? "The network did not answer.")}</div>`;
+    }
+  } catch (e) {
+    out.innerHTML = `<div class="verdict bad"><strong>Not accepted.</strong> ${esc((e as Error).message ?? String(e))}</div>`;
+  }
 }
 
 async function confirmByHash(chainId: number, memo: string, tx: string): Promise<InvoiceAnswer> {
@@ -584,6 +654,13 @@ async function followPayment(hash: string, payment: { recipient: string; amountT
       v = (await (await fetch(`/api/verify?${q}`)).json()) as typeof v;
     } catch {
       continue; // a 502 page or a dropped connection, ask again
+    }
+    if (v.status === "paid_no_memo") {
+      // The transfer succeeded but the wallet dropped the reference bytes. The money arrived, so this is
+      // not a failure. Keep the sent-hash lock and let the merchant accept the possible match.
+      setPayerStatus("Sent. Reference missing. The merchant will confirm. Do not pay again.");
+      status(`Sent. Reference missing. The merchant will confirm. ${link}. Do not pay again.`);
+      return;
     }
     if (v.status === "paid" && v.final !== true) {
       setPayerStatus(`Confirming. ${v.confirmations ?? 0} of ${v.required ?? CONFIRMATIONS_REQUIRED} confirmations. Do not pay again.`);

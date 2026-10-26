@@ -62,6 +62,16 @@ describe("verifyPayment", () => {
     expect(r).toMatchObject({ status: "mismatch" });
   });
 
+  it("reports a direct transfer without the reference as paid_no_memo, not a failure", async () => {
+    const f = mockRpc({
+      ...base,
+      eth_getTransactionByHash: () => ({ input: buildTransferData(SHOP, 5n, null), to: MEZO_TESTNET.musd }),
+      eth_getTransactionReceipt: () => receipt([{ address: MEZO_TESTNET.musd, to: SHOP, value: 5n }]),
+    });
+    const r = await verifyPayment(MEZO_TESTNET, { txHash: HASH, recipient: SHOP, amount: 5n, memo: "INV-1", includeMemo: true }, f);
+    expect(r).toMatchObject({ status: "paid_no_memo", paid: "0.000000000000000005", memoMatched: false, memo: null, confirmations: 10, block: 100, txMemo: null });
+  });
+
   it("matches the reference exactly, so a longer reference that ends the same does not count", async () => {
     const f = mockRpc({
       ...base,

@@ -3,7 +3,9 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import { MEZO_MAINNET, MEZO_TESTNET } from "../src/chains.ts";
-import { MERCHANT_ELEMENT_IDS, payerStatus, payerSummary } from "../src/payerview.ts";
+import { checkPaymentLink } from "../src/guard.ts";
+import { createPaymentLink } from "../src/merchant.ts";
+import { MERCHANT_ELEMENT_IDS, payerMaxAmount, payerStatus, payerSummary } from "../src/payerview.ts";
 
 const SHOP = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed";
 
@@ -35,6 +37,38 @@ describe("payer summary", () => {
 
   it("keeps the unknown chain visible instead of hiding it", () => {
     expect(payerSummary({ ...invoice, chainId: 1 })).toMatchObject({ token: "", network: "1" });
+  });
+});
+
+describe("payer page limit", () => {
+  const policyLink = (amount: string) => {
+    const r = createPaymentLink({ chainId: MEZO_TESTNET.id, recipient: SHOP, amount, memo: "INV-LIMIT" });
+    if (!r.ok) throw new Error("expected a valid link");
+    return { link: r.link, inv: { chainId: MEZO_TESTNET.id, to: SHOP, amount: r.payment.amountText, memo: "INV-LIMIT", link: r.link } };
+  };
+
+  for (const amount of ["51", "1000"]) {
+    it(`lets the payer view pay an invoice of ${amount} MUSD, above the hidden merchant default of 50`, () => {
+      const { link, inv } = policyLink(amount);
+      // The merchant panel default would refuse it. This was the regression on the payer view.
+      expect(checkPaymentLink(link, { maxAmount: "50" }).ok).toBe(false);
+      expect(checkPaymentLink(link, { maxAmount: payerMaxAmount(inv) }).ok).toBe(true);
+    });
+  }
+
+  it("keeps the token and recipient checks on the payer view", () => {
+    const { inv } = policyLink("51");
+    const wrongToken = createPaymentLink({ chainId: MEZO_TESTNET.id, recipient: SHOP, amount: "51", memo: "INV-LIMIT" });
+    if (!wrongToken.ok) throw new Error("expected a valid link");
+    const lookalike = wrongToken.link.replace(MEZO_TESTNET.musd, MEZO_TESTNET.musd.slice(0, -1) + "4");
+    expect(checkPaymentLink(lookalike, { maxAmount: payerMaxAmount(inv) }).ok).toBe(false);
+    const badRecipient = wrongToken.link.replace(SHOP, SHOP.replace("aAeb", "AAeb"));
+    expect(checkPaymentLink(badRecipient, { maxAmount: payerMaxAmount(inv) }).ok).toBe(false);
+  });
+
+  it("shows the effective limit beside the Pay action", () => {
+    const html = readFileSync(new URL("../web/public/index.html", import.meta.url), "utf8");
+    expect(html).toContain('id="pv-limit"');
   });
 });
 

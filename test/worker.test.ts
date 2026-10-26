@@ -121,7 +121,8 @@ describe("worker API (no network routes)", () => {
     await worker.fetch(new Request("https://x.test/api/head?chain=7", { headers: ip }), bound);
     await worker.fetch(new Request("https://x.test/api/invoices", { method: "POST", headers: ip, body: "{nope" }), bound);
     await worker.fetch(new Request("https://x.test/api/invoices/INV-X/confirm", { method: "POST", headers: ip, body: "{}" }), bound);
-    expect(keys).toEqual(["read:192.0.2.77", "create:192.0.2.77", "confirm:192.0.2.77"]);
+    await worker.fetch(new Request("https://x.test/api/invoices/INV-X/accept", { method: "POST", headers: ip, body: "{}" }), bound);
+    expect(keys).toEqual(["read:192.0.2.77", "create:192.0.2.77", "confirm:192.0.2.77", "confirm:192.0.2.77"]);
   });
 
   it("gives no explorer link for a malformed hash", async () => {

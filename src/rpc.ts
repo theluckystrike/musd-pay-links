@@ -110,10 +110,17 @@ export interface VerifyInput {
    * cannot be replayed for a new invoice. Optional.
    */
   fromBlock?: number | null;
+  /** Add the reference found in the transaction input to the answer. Used by the possible-match check. */
+  includeMemo?: boolean;
 }
 
 export type VerifyResult =
-  | { status: "paid"; paid: string; confirmations: number; memoMatched: boolean | null; block: number; from?: string }
+  | { status: "paid"; paid: string; confirmations: number; memoMatched: boolean | null; block: number; from?: string; txMemo?: string | null }
+  /**
+   * The transfer succeeded to the right recipient for at least the amount, but the wallet dropped the
+   * trailing reference bytes. It is not a failure. The merchant can accept it as a possible payment.
+   */
+  | { status: "paid_no_memo"; paid: string; confirmations: number; memoMatched: false; block: number; memo: null; from?: string; txMemo?: string | null }
   | { status: "pending" | "not_found" | "failed" | "mismatch" | "unavailable"; message: string };
 
 /** Shown when every RPC try failed, so the reader does not mistake it for an invalid payment. */
@@ -191,21 +198,30 @@ export async function verifyPayment(chain: MezoChain, input: VerifyInput, fetchI
       message: `MUSD received by the recipient in this transaction is ${formatAmount(paid)}, expected ${formatAmount(input.amount)}.`,
     };
   }
+  const block = Number(receipt.blockNumber);
+  const head = headRaw ? Number(headRaw) : block;
+  const confirmations = Math.max(1, head - block + 1);
+  const from = receipt.from && /^0x[0-9a-fA-F]{40}$/.test(receipt.from) ? getAddress(receipt.from) : undefined;
+  const direct = tx.to?.toLowerCase() === chain.musd.toLowerCase();
+  const txMemo = direct ? memoFromInput(tx.input) : null;
+  const seen = input.includeMemo ? { txMemo } : {};
   let memoMatched: boolean | null = null;
   if (input.memo) {
     // Exact match of the decoded reference, so "XINV-1" does not pay invoice "INV-1".
-    memoMatched = tx.to?.toLowerCase() === chain.musd.toLowerCase() && memoFromInput(tx.input) === input.memo;
+    memoMatched = direct && txMemo === input.memo;
     if (!memoMatched) {
+      if (direct && txMemo === null) {
+        // A direct MUSD transfer with no trailing bytes. Some wallets drop the reference. The money
+        // arrived, so this must never look like a failed payment.
+        return { status: "paid_no_memo", paid: formatAmount(paid), confirmations, memoMatched: false, memo: null, block, ...(from ? { from } : {}), ...seen };
+      }
       return {
         status: "mismatch",
         message: `This payment does not carry the reference ${input.memo} in its input data, so it cannot mark this invoice paid.`,
       };
     }
   }
-  const block = Number(receipt.blockNumber);
-  const head = headRaw ? Number(headRaw) : block;
-  const from = receipt.from && /^0x[0-9a-fA-F]{40}$/.test(receipt.from) ? getAddress(receipt.from) : undefined;
-  return { status: "paid", paid: formatAmount(paid), confirmations: Math.max(1, head - block + 1), memoMatched, block, ...(from ? { from } : {}) };
+  return { status: "paid", paid: formatAmount(paid), confirmations, memoMatched, block, ...(from ? { from } : {}), ...seen };
 }
 
 /** Most blocks one eth_getLogs call asks for. The Mezo testnet RPC refuses ranges above 10,000. */

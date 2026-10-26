@@ -3,14 +3,14 @@
 // recipient wallet (src/auth.ts). Every chain read goes to a public Mezo RPC.
 
 import { checkAddress } from "./address.ts";
-import { checkInvoiceSignature } from "./auth.ts";
+import { checkAcceptSignature, checkInvoiceSignature } from "./auth.ts";
 import { parseAmount } from "./amount.ts";
 import { chainById, CONFIRMATIONS_REQUIRED, MEZO_CHAINS, type MezoChain } from "./chains.ts";
 import { checkPaymentLink } from "./guard.ts";
 import { createPaymentLink } from "./merchant.ts";
 import { qrSvg } from "./qr.ts";
 import { quoteBorrow, readBorrowTerms, type BorrowTerms } from "./borrow.ts";
-import { checkInvoice, confirmInvoice, createInvoice, getInvoice, listInvoices, type KV, type StoredInvoice } from "./invoices.ts";
+import { acceptPossibleInvoice, checkInvoice, confirmInvoice, createInvoice, getInvoice, listInvoices, type KV, type StoredInvoice } from "./invoices.ts";
 import { claimsFor, type DONamespace } from "./claims.ts";
 export { InvoiceStoreDO } from "./claims.ts";
 import { MEMO_PATTERN } from "./eip681.ts";
@@ -94,6 +94,7 @@ export function localLimit(key: string, now = Date.now(), rule: { limit: number;
 export function statusCode(status: string): number {
   switch (status) {
     case "paid":
+    case "paid_no_memo":
     case "pending":
     case "open":
     case "confirming":
@@ -193,18 +194,20 @@ async function invoices(req: Request, url: URL, env: Env): Promise<Response> {
     const list = await listInvoices(kv, chain.id, to.address, claims);
     return json({ chainId: chain.id, to: to.address, invoices: list.map((i) => publicInvoice(i, url.origin)) });
   }
-  const confirm = rest.endsWith("/confirm") && rest.length > "/confirm".length;
+  const suffix = rest.endsWith("/accept") && rest.length > "/accept".length ? "/accept" : rest.endsWith("/confirm") && rest.length > "/confirm".length ? "/confirm" : null;
+  const action = suffix === "/accept" ? "accept" : suffix === "/confirm" ? "confirm" : null;
   let memo: string;
   try {
-    memo = decodeURIComponent(rest.slice(1, confirm ? -"/confirm".length : undefined));
+    memo = decodeURIComponent(rest.slice(1, suffix ? -suffix.length : undefined));
   } catch {
     return bad("Not an invoice reference.");
   }
   if (!MEMO_PATTERN.test(memo)) return bad("Not an invoice reference.");
-  if (confirm !== (req.method === "POST")) return bad(confirm ? "POST a JSON body {\"tx\":\"0x...\"} to confirm an invoice." : "GET only", 405);
+  if (action && req.method !== "POST") return bad(action === "confirm" ? "POST a JSON body {\"tx\":\"0x...\"} to confirm an invoice." : "POST a signed JSON body to accept a possible payment.", 405);
+  if (!action && req.method !== "GET") return bad("GET only", 405);
   const inv = await getInvoice(kv, chain.id, memo, claims);
   if (!inv) return bad(`No invoice ${memo} on ${chain.name}.`, 404);
-  if (confirm) {
+  if (action === "confirm") {
     let tx: unknown;
     try {
       tx = ((await req.json()) as { tx?: unknown }).tx;
@@ -214,6 +217,20 @@ async function invoices(req: Request, url: URL, env: Env): Promise<Response> {
     if (typeof tx !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(tx)) return bad("tx must be a transaction hash (0x and 64 hex characters).");
     const c = await confirmInvoice(kv, chain, inv, tx, undefined, new Date(), claims);
     return json(confirmAnswer(c, url.origin), statusCode(c.status));
+  }
+  if (action === "accept") {
+    let body: { tx?: unknown; timestamp?: unknown; signature?: unknown };
+    try {
+      body = (await req.json()) as typeof body;
+    } catch {
+      return bad("Send a JSON body with tx, timestamp and signature. The invoice recipient signs the accept message.");
+    }
+    const tx = typeof body.tx === "string" ? body.tx : "";
+    if (!/^0x[0-9a-fA-F]{64}$/.test(tx)) return bad("tx must be a transaction hash (0x and 64 hex characters).");
+    const auth = await checkAcceptSignature({ chainId: chain.id, to: inv.to, memo, txHash: tx, timestamp: body.timestamp }, body.signature);
+    if (!auth.ok) return json({ ok: false, reasons: [{ code: auth.code, message: auth.message }] }, 401);
+    const c = await acceptPossibleInvoice(kv, chain, inv, tx, undefined, new Date(), claims);
+    return json(acceptAnswer(c, url.origin), statusCode(c.status));
   }
   if (p.get("check") === "0") return json({ status: inv.paid ? "paid" : "open", invoice: publicInvoice(inv, url.origin), checked: false });
   const c = await checkInvoice(kv, chain, inv, undefined, new Date(), claims);
@@ -230,6 +247,14 @@ async function invoices(req: Request, url: URL, env: Env): Promise<Response> {
     : c.status === "unavailable" ? { message: c.message }
     : {};
   return json({ status: c.status, invoice: publicInvoice(c.invoice, url.origin), checked: true, required: CONFIRMATIONS_REQUIRED, ...extra }, statusCode(c.status));
+}
+
+function acceptAnswer(c: Awaited<ReturnType<typeof acceptPossibleInvoice>>, origin: string) {
+  const chain = chainById(c.invoice.chainId)!;
+  const base = { status: c.status, invoice: publicInvoice(c.invoice, origin), required: CONFIRMATIONS_REQUIRED };
+  if (c.status === "paid") return { ...base, message: "Payment accepted. The wallet dropped the reference, and the invoice recipient confirmed the match." };
+  if (c.status === "confirming") return { ...base, payment: { ...c.payment, explorer: `${chain.explorer}/tx/${c.payment.txHash}` }, confirmations: c.confirmations, message: `The payment matches without the reference. It has ${c.confirmations} of ${c.required} confirmations. Accept again in a few seconds.` };
+  return { ...base, message: c.message };
 }
 
 function confirmAnswer(c: Awaited<ReturnType<typeof confirmInvoice>>, origin: string) {
@@ -376,7 +401,7 @@ export default {
         // The in-isolate counter catches bursts at once. The Cloudflare binding counts across isolates in
         // a location, with some delay. A request must pass both.
         // Three budgets per client. Creating invoices, confirming by hash and reading the chain do not eat into each other.
-        const kind = req.method !== "POST" ? "read" : url.pathname.endsWith("/confirm") ? "confirm" : "create";
+        const kind = req.method !== "POST" ? "read" : url.pathname.endsWith("/confirm") || url.pathname.endsWith("/accept") ? "confirm" : "create";
         const rule = kind === "read" ? RATE_LIMIT : CREATE_LIMIT;
         const local = kind === "read" ? localLimit(key) : localLimit(kind + ":" + key, Date.now(), rule);
         let exact: boolean | null = null;

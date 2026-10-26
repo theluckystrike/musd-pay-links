@@ -22,7 +22,7 @@ Testnet only. No real money. Each row was checked on chain or on the live Worker
 | Same payment with a wrong reference or a later invoice block | live `/api/verify` | `mismatch` |
 | MUSD contracts on testnet and mainnet | `name()`, `symbol()`, `decimals()` | "Mezo USD", "MUSD", 18 |
 | Borrow quote from the live MUSD protocol | PriceFeed, TroveManager, BorrowerOperations, InterestRateManager | price, MCR, CCR, fee, minimum debt |
-| Tests | `LIVE=1 pnpm test` on 26 October 2026 | 304 of 304 passed |
+| Tests | `LIVE=1 pnpm test` on 26 October 2026 | 330 of 330 passed |
 
 The payer and the merchant are both test addresses of the project. The payments came from scripts. No browser wallet has paid a link yet.
 
@@ -33,6 +33,7 @@ The payer and the merchant are both test addresses of the project. The payments 
 3. The payer's guard checks the link. The token must be the real MUSD contract for the chain id. The recipient must be a valid address. The amount must be within the payer's limit. Every refusal has a code and a plain reason. The guard returns an unsigned `transfer` call. It never holds a key.
 4. A payer who is short of MUSD sees how much BTC would mint it in the MUSD protocol. The page links to the borrow page of the Mezo app.
 5. The Worker finds the payment on chain by its reference. The payer does not send a hash.
+6. A wallet may drop the reference. Such a payment shows as a possible match. The invoice recipient signs an accept request that names the reference and the transaction hash. The watch panel offers an **Accept this payment** button when the connected wallet is the invoice recipient. The invoice is then recorded as paid with `referenceMissing: true`.
 
 ## How it protects the money
 
@@ -41,6 +42,7 @@ The payer and the merchant are both test addresses of the project. The payments 
 - An invoice is recorded as paid only at 5 confirmations (`CONFIRMATIONS_REQUIRED`). Before that, the answer is `confirming` with the depth.
 - `GET /api/verify` always returns `final`. It is `false` until the payment reaches 5 confirmations, and the pay page shows `Confirming` until `final` is `true`.
 - `POST /api/invoices/:memo/confirm` with `{"tx":"0x..."}` records a payment by hash. It checks the stored invoice, not the caller. Use it for invoices older than the search window of about 23 hours.
+- `POST /api/invoices/:memo/accept` with `{"tx":"0x...","timestamp":...,"signature":"0x..."}` records a payment that arrived without the reference. Only the invoice recipient can sign it. The signature covers the chain, recipient, reference, transaction hash and time. The payment must be the exact amount and at least 5 blocks deep. The stored payment has `referenceMissing: true`.
 - One transaction pays one invoice. A payment mined before the invoice block does not count. The reference must match exactly.
 - Reference claims and paid transaction hashes are compare-and-set in a Durable Object per chain, so concurrent creates cannot share a reference and one transaction cannot pay two invoices.
 - Only the recipient wallet can create invoices for its address. The signature covers chain, recipient, amount, reference and time. The time must be within 10 minutes. A replay gets 409, because the reference is already used.
@@ -74,12 +76,13 @@ The amount is in base units (12.5 MUSD here). The `memo` is up to 32 characters.
 | `POST /api/invoices` | Signed create. Body has `chain`, `to`, `amount`, `memo`, `timestamp`, `signature`. 401 without a valid signature |
 | `GET /api/invoices/INV-...?chain=31611` | Check one invoice on chain. `paid`, `confirming` or `open` |
 | `POST /api/invoices/INV-.../confirm?chain=31611` | Confirm by hash with `{"tx":"0x..."}` |
+| `POST /api/invoices/INV-.../accept?chain=31611` | Accept a no-reference payment. Body has `tx`, `timestamp`, `signature` by the invoice recipient |
 | `GET /api/invoices?chain=31611&to=0x...` | The 20 newest invoices of an address |
 | `GET /api/verify?chain=31611&tx=0x...&to=0x...&amount=5&memo=INV-1` | Check one payment. Always gives `final`, with `confirmations` and `required`. `final` is true only at 5 confirmations |
 | `GET /api/payments?chain=31611&to=0x...` | Merchant inbox. `matches` and `possible` are `null` when not evaluated |
 | `GET /api/borrow?chain=31611&need=25` | Borrow quote from the live MUSD protocol |
 
-HTTP codes follow the answer. 200 for `paid`, `confirming`, `open` and `pending`. 401 for a bad signature. 404 for `not_found`. 409 for a used reference or transaction, and for a second payment of a paid invoice (`already_paid`). 422 for `mismatch`. 503 when the network does not answer. Errors never contain internal detail.
+HTTP codes follow the answer. 200 for `paid`, `paid_no_memo`, `confirming`, `open` and `pending`. 401 for a bad signature. 404 for `not_found`. 409 for a used reference or transaction, and for a second payment of a paid invoice (`already_paid`). 422 for `mismatch`, `failed` and `not_possible` (a transaction that carries the reference). 503 when the network does not answer. Errors never contain internal detail.
 
 Chain routes send no CORS header. They allow 30 calls a minute per client. Writes allow 10 a minute. A Durable Object keeps the exact count.
 
@@ -110,7 +113,7 @@ MEZO_KEY_FILE=/path/to/key pnpm create-invoice 5          # signed invoice for t
 - Signed create works with plain wallets (EOA). Smart-contract wallets (EIP-1271) are not supported yet.
 - Invoices made before 26 October 2026 have no signature. They stay readable and show `signed: false`.
 - After about 23 hours an open invoice cannot prove on its page that it is unpaid, so its Pay button stays locked. The merchant makes a new invoice or records a payment by hash.
-- A payment without the reference cannot be recorded by hash. The page shows it as a possible match for a person to check.
+- A payment without the reference is not recorded automatically. The page shows it as a possible match. The invoice recipient accepts it with a signed `POST .../accept` request for its transaction hash, so a person checks it first.
 - The app uses MUSD only. It does not use the MEZO token yet.
 - The verifier trusts the public Mezo RPC endpoints.
 

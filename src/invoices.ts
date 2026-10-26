@@ -27,7 +27,7 @@ export interface StoredInvoice {
   fromBlock: number;
   createdAt: string;
   link: string;
-  paid?: { txHash: string; block: number; from: string; amount: string; at: string };
+  paid?: { txHash: string; block: number; from: string; amount: string; at: string; referenceMissing?: true };
   /** true when the recipient wallet signed the create request (src/auth.ts). Older invoices have no flag. */
   signed?: boolean;
 }
@@ -123,6 +123,8 @@ export interface PaymentRef {
   block: number;
   from: string;
   amount: string;
+  /** True when the merchant accepted a payment whose wallet dropped the reference bytes. */
+  referenceMissing?: true;
 }
 
 export type InvoiceCheck =
@@ -139,7 +141,7 @@ type RecordResult = { status: "paid"; invoice: StoredInvoice } | { status: "alre
  * invoice. With a claims store the two writes are one atomic transaction. KV is updated as a cache.
  */
 async function recordPaid(kv: KV, chainId: number, invoice: StoredInvoice, p: PaymentRef, now: Date, claims?: InvoiceClaims): Promise<RecordResult> {
-  const paid: Paid = { txHash: p.txHash, block: p.block, from: p.from, amount: p.amount, at: now.toISOString() };
+  const paid: Paid = { txHash: p.txHash, block: p.block, from: p.from, amount: p.amount, at: now.toISOString(), ...(p.referenceMissing ? { referenceMissing: true } : {}) };
   let result: RecordResult;
   if (claims) {
     // A paid invoice that is still only in KV keeps its transaction claimed during the migration.
@@ -189,7 +191,7 @@ export type ConfirmResult =
   /** The invoice was paid by another transaction. A second payment is not hidden behind a "paid". */
   | { status: "already_paid"; invoice: StoredInvoice; message: string }
   | { status: "confirming"; invoice: StoredInvoice; payment: PaymentRef; confirmations: number; required: number }
-  | { status: "tx_used" | "pending" | "not_found" | "failed" | "mismatch" | "unavailable"; invoice: StoredInvoice; message: string };
+  | { status: "tx_used" | "pending" | "not_found" | "failed" | "mismatch" | "unavailable" | "not_possible"; invoice: StoredInvoice; message: string };
 
 /**
  * Confirm an invoice by transaction hash, for payments the automatic search cannot see (an invoice older
@@ -199,12 +201,52 @@ export type ConfirmResult =
 export async function confirmInvoice(kv: KV, chain: MezoChain, invoice: StoredInvoice, txHash: string, fetchImpl?: Fetch, now: Date = new Date(), claims?: InvoiceClaims): Promise<ConfirmResult> {
   if (invoice.paid?.txHash.toLowerCase() === txHash.toLowerCase()) return { status: "paid", invoice };
   const v = await verifyPayment(chain, { txHash, recipient: invoice.to, amount: BigInt(invoice.units), memo: invoice.memo, fromBlock: invoice.fromBlock }, fetchImpl);
+  if (v.status === "paid_no_memo") return { status: "not_possible", invoice, message: "This transaction has no reference. Use the accept action instead." };
   if (v.status !== "paid") return { status: v.status, invoice, message: v.message };
   // Only a transaction that really pays this invoice is called a second payment.
   if (invoice.paid) return { status: "already_paid", invoice, message: `Invoice ${invoice.memo} was already paid by ${invoice.paid.txHash}. This transaction is a second payment and does not count for it.` };
   const ref: PaymentRef = { txHash: txHash.toLowerCase(), block: v.block, from: v.from ?? "", amount: v.paid };
   // The owner check comes before the depth check, so a shallow transaction that already paid another
   // invoice is reported as tx_used on this invoice, not as confirming.
+  const owner = claims ? ((await claims.owner(chain.id, txHash)) ?? (await kv.get(txKey(chain.id, txHash)))) : await kv.get(txKey(chain.id, txHash));
+  if (owner && owner !== invoice.memo) return { status: "tx_used", invoice, message: `This transaction already paid invoice ${owner}. One transaction pays one invoice.` };
+  if (v.confirmations < CONFIRMATIONS_REQUIRED) return { status: "confirming", invoice, payment: ref, confirmations: v.confirmations, required: CONFIRMATIONS_REQUIRED };
+  const recorded = await recordPaid(kv, chain.id, invoice, ref, now, claims);
+  if (recorded.status === "tx_used") return { status: "tx_used", invoice, message: `This transaction already paid invoice ${recorded.owner ?? "another invoice"}. One transaction pays one invoice.` };
+  if (recorded.status === "already_paid") return { status: "already_paid", invoice: recorded.invoice, message: `Invoice ${invoice.memo} was already paid by another transaction. This transaction is a second payment and does not count for it.` };
+  return { status: "paid", invoice: recorded.invoice };
+}
+
+export type AcceptResult =
+  | { status: "paid"; invoice: StoredInvoice }
+  | { status: "confirming"; invoice: StoredInvoice; payment: PaymentRef; confirmations: number; required: number }
+  | { status: "already_paid"; invoice: StoredInvoice; message: string }
+  | { status: "tx_used" | "pending" | "not_found" | "failed" | "mismatch" | "unavailable" | "not_possible"; invoice: StoredInvoice; message: string };
+
+/**
+ * Accept a payment that arrived without the reference. The merchant signs the request with the wallet of
+ * the invoice recipient (src/auth.ts), so only the recipient can accept a possible match. The transaction
+ * must pay the invoice recipient, from the invoice block or later, with the exact invoice amount. The
+ * payment is then recorded with referenceMissing: true and claims its hash like any other payment.
+ */
+export async function acceptPossibleInvoice(
+  kv: KV,
+  chain: MezoChain,
+  invoice: StoredInvoice,
+  txHash: string,
+  fetchImpl?: Fetch,
+  now: Date = new Date(),
+  claims?: InvoiceClaims,
+): Promise<AcceptResult> {
+  if (invoice.paid?.txHash.toLowerCase() === txHash.toLowerCase()) return { status: "paid", invoice };
+  const v = await verifyPayment(chain, { txHash, recipient: invoice.to, amount: BigInt(invoice.units), memo: invoice.memo, fromBlock: invoice.fromBlock }, fetchImpl);
+  if (v.status === "paid") return { status: "not_possible", invoice, message: "This transaction carries the reference. Use the confirm action instead." };
+  if (v.status !== "paid_no_memo") return { status: v.status, invoice, message: v.message };
+  if (v.paid !== invoice.amount) {
+    return { status: "mismatch", invoice, message: `This transaction sent ${v.paid} MUSD, not the invoice amount ${invoice.amount} MUSD. A possible match must be the exact amount.` };
+  }
+  if (invoice.paid) return { status: "already_paid", invoice, message: `Invoice ${invoice.memo} was already paid by ${invoice.paid.txHash}. This transaction is a second payment and does not count for it.` };
+  const ref: PaymentRef = { txHash: txHash.toLowerCase(), block: v.block, from: v.from ?? "", amount: v.paid, referenceMissing: true };
   const owner = claims ? ((await claims.owner(chain.id, txHash)) ?? (await kv.get(txKey(chain.id, txHash)))) : await kv.get(txKey(chain.id, txHash));
   if (owner && owner !== invoice.memo) return { status: "tx_used", invoice, message: `This transaction already paid invoice ${owner}. One transaction pays one invoice.` };
   if (v.confirmations < CONFIRMATIONS_REQUIRED) return { status: "confirming", invoice, payment: ref, confirmations: v.confirmations, required: CONFIRMATIONS_REQUIRED };

@@ -26,6 +26,14 @@ export interface PayerSummary {
   qrLabel: string;
 }
 
+/**
+ * The payer limit on an invoice page is the invoice amount, not a hidden merchant default. The payer
+ * sees the amount in the summary and confirms it with Pay. The token and recipient checks still run.
+ */
+export function payerMaxAmount(inv: Pick<PayerInvoice, "amount">): string {
+  return inv.amount;
+}
+
 /** The fields of the payer summary. The token is the MUSD contract for the invoice chain. */
 export function payerSummary(inv: PayerInvoice): PayerSummary {
   const chain = chainById(inv.chainId);
