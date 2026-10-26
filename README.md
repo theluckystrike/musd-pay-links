@@ -22,14 +22,14 @@ Testnet only. No real money. Each row was checked on chain or on the live Worker
 | Same payment with a wrong reference or a later invoice block | live `/api/verify` | `mismatch` |
 | MUSD contracts on testnet and mainnet | `name()`, `symbol()`, `decimals()` | "Mezo USD", "MUSD", 18 |
 | Borrow quote from the live MUSD protocol | PriceFeed, TroveManager, BorrowerOperations, InterestRateManager | price, MCR, CCR, fee, minimum debt |
-| Tests | `LIVE=1 pnpm test` on 26 October 2026 | 295 of 295 passed |
+| Tests | `LIVE=1 pnpm test` on 26 October 2026 | 304 of 304 passed |
 
 The payer and the merchant are both test addresses of the project. The payments came from scripts. No browser wallet has paid a link yet.
 
 ## What it does
 
 1. The merchant creates an invoice. The wallet that receives the payment signs it (EIP-191 `personal_sign`, a free message). The Worker gives the invoice a unique reference and stamps it with the current block.
-2. The merchant shares an EIP-681 link, a QR code or a pay page.
+2. The merchant shares an EIP-681 link, a QR code or a pay page. A pay page (`/?invoice=...`) is payer-only. It shows the amount, recipient, token, network, reference, status with confirmation depth, the QR code and the Pay action. The merchant panels stay hidden.
 3. The payer's guard checks the link. The token must be the real MUSD contract for the chain id. The recipient must be a valid address. The amount must be within the payer's limit. Every refusal has a code and a plain reason. The guard returns an unsigned `transfer` call. It never holds a key.
 4. A payer who is short of MUSD sees how much BTC would mint it in the MUSD protocol. The page links to the borrow page of the Mezo app.
 5. The Worker finds the payment on chain by its reference. The payer does not send a hash.
@@ -39,6 +39,7 @@ The payer and the merchant are both test addresses of the project. The payments 
 - The pay page checks the chain when it opens and again right before the wallet window opens. Pay stays locked when a matching payment exists, when the search cannot cover every block since the invoice, or when the check fails. A second click while the wallet is open does nothing. The page remembers a hash it sent, so a reload or a second tab does not pay again.
 - A smaller payment with the reference, or a payment of the exact amount without it, also locks Pay. The payer must say it is not theirs first.
 - An invoice is recorded as paid only at 5 confirmations (`CONFIRMATIONS_REQUIRED`). Before that, the answer is `confirming` with the depth.
+- `GET /api/verify` always returns `final`. It is `false` until the payment reaches 5 confirmations, and the pay page shows `Confirming` until `final` is `true`.
 - `POST /api/invoices/:memo/confirm` with `{"tx":"0x..."}` records a payment by hash. It checks the stored invoice, not the caller. Use it for invoices older than the search window of about 23 hours.
 - One transaction pays one invoice. A payment mined before the invoice block does not count. The reference must match exactly.
 - Only the recipient wallet can create invoices for its address. The signature covers chain, recipient, amount, reference and time. The time must be within 10 minutes. A replay gets 409, because the reference is already used.
@@ -73,7 +74,7 @@ The amount is in base units (12.5 MUSD here). The `memo` is up to 32 characters.
 | `GET /api/invoices/INV-...?chain=31611` | Check one invoice on chain. `paid`, `confirming` or `open` |
 | `POST /api/invoices/INV-.../confirm?chain=31611` | Confirm by hash with `{"tx":"0x..."}` |
 | `GET /api/invoices?chain=31611&to=0x...` | The 20 newest invoices of an address |
-| `GET /api/verify?chain=31611&tx=0x...&to=0x...&amount=5&memo=INV-1` | Check one payment. Gives `confirmations` and `final` |
+| `GET /api/verify?chain=31611&tx=0x...&to=0x...&amount=5&memo=INV-1` | Check one payment. Always gives `final`, with `confirmations` and `required`. `final` is true only at 5 confirmations |
 | `GET /api/payments?chain=31611&to=0x...` | Merchant inbox. `matches` and `possible` are `null` when not evaluated |
 | `GET /api/borrow?chain=31611&need=25` | Borrow quote from the live MUSD protocol |
 

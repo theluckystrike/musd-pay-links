@@ -313,8 +313,9 @@ async function api(url: URL): Promise<Response> {
       const r = await verifyPayment(chain, { txHash: p.get("tx") ?? "", recipient: to.address, amount, memo: p.get("memo"), fromBlock });
       const tx = p.get("tx") ?? "";
       const explorer = /^0x[0-9a-fA-F]{64}$/.test(tx) ? `${chain.explorer}/tx/${tx}` : null;
-      const depth = r.status === "paid" ? { required: CONFIRMATIONS_REQUIRED, final: r.confirmations >= CONFIRMATIONS_REQUIRED } : {};
-      return json({ chainId: chain.id, ...r, ...depth, explorer }, statusCode(r.status));
+      // final is always present. It is true only when the payment is at the required depth.
+      const final = r.status === "paid" && r.confirmations >= CONFIRMATIONS_REQUIRED;
+      return json({ chainId: chain.id, ...r, required: CONFIRMATIONS_REQUIRED, final, explorer }, statusCode(r.status));
     }
 
     case "/api/payments": {

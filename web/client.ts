@@ -9,6 +9,7 @@ import { chainById, CONFIRMATIONS_REQUIRED, MEZO_TESTNET } from "../src/chains.t
 import { checkPaymentLink, type CheckResult } from "../src/guard.ts";
 import { createPaymentLink } from "../src/merchant.ts";
 import { payPageLock } from "../src/paystate.ts";
+import { MERCHANT_ELEMENT_IDS, payerStatus, payerSummary } from "../src/payerview.ts";
 import { newReference } from "../src/invoices.ts";
 import { qrSvg } from "../src/qr.ts";
 
@@ -57,11 +58,45 @@ let payLock: string | null = null;
 /** Polling interval of "Watch for this payment". 4 calls a minute, so a merchant who watches stays far below the read limit. */
 const WATCH_INTERVAL_MS = 15_000;
 
+function isPayerView(): boolean {
+  const pv = document.getElementById("payer-view") as HTMLElement | null;
+  return !!pv && !pv.hidden;
+}
+
+/** The element that shows the result of the pay action. A pay page uses its own area. */
+function payOut(): HTMLElement {
+  return isPayerView() ? $<HTMLElement>("pv-out") : $<HTMLElement>("p-out");
+}
+
 function setPayButton(): void {
   const eth = (window as unknown as { ethereum?: unknown }).ethereum;
-  const b = $<HTMLButtonElement>("p-pay");
-  b.disabled = !(lastCheck?.ok && eth) || payLock !== null || paying;
-  b.title = payLock ?? (eth ? "" : "No browser wallet found");
+  const disabled = !(lastCheck?.ok && eth) || payLock !== null || paying;
+  const title = payLock ?? (eth ? "" : "No browser wallet found");
+  for (const id of ["p-pay", "pv-pay"]) {
+    const b = document.getElementById(id) as HTMLButtonElement | null;
+    if (!b) continue;
+    b.disabled = disabled;
+    b.title = title;
+  }
+}
+
+/** The payer status line. It also carries the confirmation depth while the payment is not final. */
+function setPayerStatus(text: string): void {
+  const s = document.getElementById("pv-status");
+  if (s && isPayerView()) s.textContent = text;
+}
+
+function fillPayerSummary(inv: ServerInvoice): void {
+  const s = payerSummary(inv);
+  $("pv-amount").textContent = s.amount;
+  $("pv-recipient").textContent = s.recipient;
+  const chain = chainById(inv.chainId);
+  $("pv-token").innerHTML = chain ? `<a href="${chain.explorer}/token/${s.token}" target="_blank" rel="noopener">MUSD ${esc(s.token)}</a>` : esc(s.token);
+  $("pv-network").textContent = s.network;
+  $("pv-memo").textContent = s.reference;
+  const qr = $("pv-qr");
+  qr.innerHTML = qrSvg(inv.link);
+  qr.setAttribute("aria-label", s.qrLabel);
 }
 
 function renderVerdict(r: CheckResult): string {
@@ -96,7 +131,13 @@ function runCheck(): void {
   });
   lastCheck = r;
   const shown = /[^\x21-\x7e]/.test(link) ? `<div class="muted">What the guard sees</div><div class="mono">${esc(visible(link))}</div>` : "";
-  $("p-out").innerHTML = shown + renderVerdict(r) + (payLock ? `<div class="note">${esc(payLock)}</div>` : "");
+  const verdict = shown + renderVerdict(r) + (payLock ? `<div class="note">${esc(payLock)}</div>` : "");
+  if (isPayerView()) {
+    // The pay page shows the summary, the status and the Pay action. Expand only a refusal.
+    $("pv-out").innerHTML = r.ok ? "" : verdict;
+  } else {
+    $("p-out").innerHTML = verdict;
+  }
   setPayButton();
 }
 
@@ -305,12 +346,25 @@ function withoutAcknowledged(a: InvoiceAnswer): InvoiceAnswer {
   return { ...a, possible: keep(a.possible), partial: keep(a.partial) };
 }
 
+/** Payments that the payer can dismiss to unlock Pay, and which kind they are. */
+let payerUnlockList: InboxPayment[] = [];
+let payerUnlockPartial = false;
+
+function updatePayerUnlock(): void {
+  const b = document.getElementById("pv-unlock") as HTMLButtonElement | null;
+  if (!b) return;
+  b.hidden = payerUnlockList.length === 0;
+  b.textContent = payerUnlockPartial ? "The merchant told me to pay. Unlock Pay" : "None of these is mine. Unlock Pay";
+}
+
 function applyInvoiceState(answer: InvoiceAnswer): void {
   const a = withoutAcknowledged(answer);
   const inv = a.invoice;
   const banner = $("pay-banner");
   const again = `<div class="actions"><button class="ghost small" id="pay-recheck" type="button">Check again</button></div>`;
   const lock = payPageLock(a);
+  payerUnlockList = [];
+  payerUnlockPartial = false;
   if (lock === "not_found") {
     payLock = "This invoice was not found.";
     banner.innerHTML = `<strong>${esc(a.error ?? "This invoice was not found.")}</strong>`;
@@ -325,6 +379,8 @@ function applyInvoiceState(answer: InvoiceAnswer): void {
     banner.innerHTML = `<strong>Invoice ${esc(inv.memo)}. This page cannot prove that it is unpaid.</strong> ${a.clamped ? "The invoice is older than the search window of about 23 hours." : "The merchant address has more payments than the page reads."} Ask the merchant for a new invoice.`;
   } else if ((lock === "possible" || lock === "partial") && inv) {
     const list = (lock === "partial" ? a.partial : a.possible) ?? [];
+    payerUnlockList = list;
+    payerUnlockPartial = lock === "partial";
     payLock = lock === "partial" ? "A smaller payment with this reference exists. Ask the merchant before you pay." : "A payment of exactly this amount without the reference exists. Check that it is not yours.";
     const rows = list.map((x) => `<li>${esc(x.amount)} MUSD from ${esc(x.from)} in block ${x.block}</li>`).join("");
     const head = lock === "partial"
@@ -345,6 +401,10 @@ function applyInvoiceState(answer: InvoiceAnswer): void {
     payLock = "The chain could not be checked, so Pay is locked.";
     banner.innerHTML = `<strong>Could not check on chain whether invoice ${esc(inv?.memo ?? payInvoice?.memo ?? "")} is paid.</strong> ${esc(a.error ?? a.message ?? "")} Pay is locked until the check works.${again}`;
   }
+  updatePayerUnlock();
+  const short = document.getElementById("pv-short");
+  if (short) short.hidden = !inv;
+  setPayerStatus(payerStatus({ lock, confirmations: a.confirmations, required: a.required, head: a.head, count: payerUnlockList.length || undefined }));
   const btn = document.getElementById("pay-recheck");
   if (btn && payInvoice) btn.onclick = () => void loadPayInvoice(payInvoice!.chainId, payInvoice!.memo);
   setPayButton();
@@ -394,6 +454,7 @@ async function lockIfSentHere(chainId: number, memo: string, a: InvoiceAnswer): 
   payLock = "This browser already sent a payment for this invoice.";
   $("pay-banner").innerHTML = `<strong>This browser already sent a payment for invoice ${esc(memo)}.</strong> The chain does not show it as final yet. Do not pay again. <a href="${chain.explorer}/tx/${esc(hash)}" target="_blank" rel="noopener">See the payment</a>.
     <div class="actions"><button class="ghost small" id="pay-recheck" type="button">Check again</button></div>`;
+  setPayerStatus("This browser already sent a payment for this invoice. The chain does not show it as final yet. Do not pay again.");
   const btn = document.getElementById("pay-recheck");
   if (btn) btn.onclick = () => void loadPayInvoice(chainId, memo);
   setPayButton();
@@ -404,12 +465,14 @@ async function loadPayInvoice(chainId: number, memo: string): Promise<InvoiceAns
   payInvoice = { chainId, memo };
   payLock = "Checking the chain for an earlier payment...";
   setPayButton();
+  setPayerStatus("Checking the chain for an earlier payment...");
   $("pay-banner").innerHTML = `<strong>Checking the chain for a payment of invoice ${esc(memo)}...</strong>`;
   const a = await fetchInvoice(chainId, memo, true);
   if (a.invoice) {
     payInvoice = { chainId, memo, to: a.invoice.to, units: a.invoice.units };
     $<HTMLSelectElement>("p-net").value = String(chainId);
     $<HTMLTextAreaElement>("p-link").value = a.invoice.link;
+    fillPayerSummary(a.invoice);
   }
   applyInvoiceState(a);
   await lockIfSentHere(chainId, memo, a);
@@ -452,7 +515,7 @@ async function payWithWallet(): Promise<void> {
   const eth = (window as unknown as { ethereum?: Eip1193 }).ethereum;
   const { tx, payment } = lastCheck;
   const chain = chainById(tx.chainId)!;
-  const out = $("p-out");
+  const out = payOut();
   const check = lastCheck;
   const status = (html: string) => (out.innerHTML = renderVerdict(check) + `<div class="note">${html}</div>`);
   let hash: string | null = null;
@@ -479,6 +542,10 @@ async function payWithWallet(): Promise<void> {
       status(`Your wallet holds ${esc(formatAmount(BigInt(bal.balance)))} MUSD on ${esc(chain.name)}, less than ${esc(payment.amountText)}. Nothing was sent. See below how much BTC would mint the rest.`);
       $("b-need").value = formatAmount(payment.amount - BigInt(bal.balance));
       $<HTMLSelectElement>("b-chain").value = String(chain.id);
+      if (isPayerView()) {
+        $("b-panel").hidden = false;
+        $("pv-short").hidden = true;
+      }
       void runBorrow();
       return;
     }
@@ -500,6 +567,7 @@ async function payWithWallet(): Promise<void> {
   // From here the money has left. The page never offers to pay again and never says "error" for a network hiccup.
   if (payInvoice) writeSent(payInvoice.chainId, payInvoice.memo, hash);
   payLock = "You sent a payment from this page. Do not pay again.";
+  setPayerStatus("You sent a payment from this page. Do not pay again.");
   paying = false;
   setPayButton();
   await followPayment(hash, payment, chain, status);
@@ -511,17 +579,18 @@ async function followPayment(hash: string, payment: { recipient: string; amountT
   const q = new URLSearchParams({ chain: String(chain.id), tx: hash, to: payment.recipient, amount: payment.amountText, memo: payment.memo ?? "" });
   for (let i = 0; i < 40; i++) {
     await new Promise((res) => setTimeout(res, 4000));
-    let v: { status?: string; confirmations?: number; message?: string };
+    let v: { status?: string; confirmations?: number; required?: number; final?: boolean; message?: string };
     try {
       v = (await (await fetch(`/api/verify?${q}`)).json()) as typeof v;
     } catch {
       continue; // a 502 page or a dropped connection, ask again
     }
-    if (v.status === "paid" && (v.confirmations ?? 0) < CONFIRMATIONS_REQUIRED) {
-      status(`Mined. ${link}. ${v.confirmations} of ${CONFIRMATIONS_REQUIRED} confirmations. Do not pay again.`);
+    if (v.status === "paid" && v.final !== true) {
+      setPayerStatus(`Confirming. ${v.confirmations ?? 0} of ${v.required ?? CONFIRMATIONS_REQUIRED} confirmations. Do not pay again.`);
+      status(`Confirming. ${link}. ${v.confirmations ?? 0} of ${v.required ?? CONFIRMATIONS_REQUIRED} confirmations. Do not pay again.`);
       continue;
     }
-    if (v.status === "paid") {
+    if (v.status === "paid" && v.final === true) {
       let rec = "";
       if (payInvoice) {
         const c = await confirmByHash(payInvoice.chainId, payInvoice.memo, hash);
@@ -529,11 +598,13 @@ async function followPayment(hash: string, payment: { recipient: string; amountT
           : c.status === "already_paid" ? ` <strong>The invoice was already paid by another transaction, so this is a second payment.</strong> Ask the merchant for a refund.`
           : ` The invoice is not recorded yet (${esc(c.message ?? c.status)}). It is recorded on the next check, or the merchant can record it by hash.`;
       }
+      setPayerStatus("Paid. Do not pay it again.");
       status(`Confirmed on chain. ${esc(payment.amountText)} MUSD received, ${v.confirmations} confirmations. ${link}.${rec}`);
       return;
     }
     if (v.status === "failed" || v.status === "mismatch") {
       if (payInvoice) writeSent(payInvoice.chainId, payInvoice.memo, null);
+      setPayerStatus("The payment did not succeed. Reload the page before you try again.");
       status(`${esc(v.message ?? v.status)} ${link}. Reload the page before you try again.`);
       return;
     }
@@ -546,13 +617,18 @@ const VERIFY_RETRY_MESSAGE = "The network did not answer in time. Try again in a
 const VERIFY_NOT_FOUND_MESSAGE = "No transaction with this hash on this network. Check the hash and the network.";
 const VERIFY_TRIES = 3;
 
-function renderVerify(v: Record<string, unknown>, paid: boolean, memo: string): string {
-  const head = paid ? `Paid. ${esc(String(v.paid))} MUSD reached the recipient.` : esc(String(v.message ?? v.error ?? v.status));
-  const deep = Number(v.confirmations ?? 0) >= CONFIRMATIONS_REQUIRED;
-  return `<div class="verdict ${paid ? "ok" : "bad"}"><strong>${head}</strong>
-    ${paid ? `<dl class="kv"><dt>Block</dt><dd>${v.block}</dd><dt>Confirmations</dt><dd>${v.confirmations} (${deep ? "final" : `${CONFIRMATIONS_REQUIRED} needed`})</dd><dt>Reference</dt><dd>${v.memoMatched === null ? "not checked" : v.memoMatched ? "matches" : "does not match"}</dd></dl>` : ""}
+function renderVerify(v: Record<string, unknown>, final: boolean, memo: string): string {
+  const status = String(v.status ?? "");
+  const head = final
+    ? `Paid. ${esc(String(v.paid))} MUSD reached the recipient.`
+    : status === "paid" || status === "confirming"
+      ? `Confirming. ${String(v.confirmations ?? 0)} of ${String(v.required ?? CONFIRMATIONS_REQUIRED)} confirmations. Final at ${String(v.required ?? CONFIRMATIONS_REQUIRED)}.`
+      : esc(String(v.message ?? v.error ?? v.status));
+  const ok = final || status === "confirming" || status === "paid";
+  return `<div class="verdict ${ok ? "ok" : "bad"}"><strong>${head}</strong>
+    ${status === "paid" || status === "confirming" ? `<dl class="kv"><dt>Block</dt><dd>${v.block}</dd><dt>Confirmations</dt><dd>${v.confirmations} (${final ? "final" : `${CONFIRMATIONS_REQUIRED} needed`})</dd><dt>Reference</dt><dd>${v.memoMatched === null ? "not checked" : v.memoMatched ? "matches" : "does not match"}</dd></dl>` : ""}
     ${v.explorer ? `<div style="margin-top:6px"><a href="${esc(String(v.explorer))}" target="_blank" rel="noopener">Open in explorer</a></div>` : ""}
-    ${paid && memo ? `<div class="actions"><button class="ghost small" id="v-record" type="button">Record invoice ${esc(memo)} as paid</button></div><div id="v-record-out" class="muted"></div>` : ""}</div>`;
+    ${final && memo ? `<div class="actions"><button class="ghost small" id="v-record" type="button">Record invoice ${esc(memo)} as paid</button></div><div id="v-record-out" class="muted"></div>` : ""}</div>`;
 }
 
 async function runVerify(): Promise<void> {
@@ -583,7 +659,7 @@ async function runVerify(): Promise<void> {
       out.innerHTML = `<div class="verdict bad"><strong>${esc(status === "not_found" ? VERIFY_NOT_FOUND_MESSAGE : VERIFY_RETRY_MESSAGE)}</strong></div>`;
       return;
     }
-    out.innerHTML = renderVerify(v, status === "paid", q.get("memo") ?? "");
+    out.innerHTML = renderVerify(v, status === "paid" && v.final === true, q.get("memo") ?? "");
     const rec = document.getElementById("v-record");
     if (rec) {
       rec.onclick = async () => {
@@ -709,24 +785,43 @@ function init(): void {
   $("m-chain").onchange = () => void loadInvoices();
   $("p-go").onclick = runCheck;
   $("p-pay").onclick = () => void payWithWallet();
+  $("pv-pay").onclick = () => void payWithWallet();
   $("p-can").onclick = () => void runCanPay();
   $("v-go").onclick = () => void runVerify();
   $("b-go").onclick = () => void runBorrow();
   $("p-net").onchange = runCheck;
+  $("pv-check").onclick = () => {
+    if (payInvoice) void loadPayInvoice(payInvoice.chainId, payInvoice.memo);
+  };
+  $("pv-unlock").onclick = () => {
+    for (const x of payerUnlockList) acknowledged.add(x.txHash.toLowerCase());
+    if (payInvoice) void loadPayInvoice(payInvoice.chainId, payInvoice.memo);
+  };
+  $("pv-short").onclick = () => {
+    $("b-panel").hidden = false;
+    $("pv-short").hidden = true;
+    $<HTMLSelectElement>("b-chain").value = String(payInvoice?.chainId ?? 31611);
+    $("b-panel").scrollIntoView({ behavior: "smooth" });
+    void runBorrow();
+  };
   const qs = new URLSearchParams(location.search);
   const shared = qs.get("pay");
   const invoiceRef = qs.get("invoice");
-  if (shared || invoiceRef) {
+  if (invoiceRef) {
+    // Payer-only view. The merchant panels stay hidden and the payer sees the invoice and the Pay action.
+    $("payer-view").hidden = false;
+    $("pay-banner").hidden = true;
+    for (const id of MERCHANT_ELEMENT_IDS) $(id).hidden = true;
+    $("pv-short").hidden = false;
+    // The chain is checked on load, so a link that was already paid cannot be paid a second time.
+    void loadPayInvoice(Number(qs.get("chain") ?? "31611"), invoiceRef);
+    $("payer-view").scrollIntoView();
+  } else if (shared) {
     $("pay-banner").hidden = false;
     $("m-panel").hidden = true;
     $("steps").hidden = true;
-    if (shared) {
-      $<HTMLTextAreaElement>("p-link").value = shared;
-      runCheck();
-    } else {
-      // The chain is checked on load, so a link that was already paid cannot be paid a second time.
-      void loadPayInvoice(Number(qs.get("chain") ?? "31611"), invoiceRef!);
-    }
+    $<HTMLTextAreaElement>("p-link").value = shared;
+    runCheck();
     $("p-h").scrollIntoView();
   } else {
     void loadInvoices();
@@ -735,8 +830,11 @@ function init(): void {
     if (first.ok) $<HTMLTextAreaElement>("p-link").value = first.link;
     runCheck();
   }
-  void loadLive();
-  void runBorrow();
+  // The merchant page reads the live contracts and the borrow quote. A pay page waits for the payer to ask.
+  if (!invoiceRef) {
+    void loadLive();
+    void runBorrow();
+  }
 }
 
 init();

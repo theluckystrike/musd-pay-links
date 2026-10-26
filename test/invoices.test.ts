@@ -374,6 +374,10 @@ describe("invoice routes", () => {
       const q = (tx: string) => call(e, `/api/verify?chain=31611&tx=${tx}&to=${SHOP}&amount=5&memo=INV-V`);
       expect(await (await q(h(51))).json()).toMatchObject({ status: "paid", confirmations: 2, required: 5, final: false });
       expect(await (await q(h(52))).json()).toMatchObject({ status: "paid", confirmations: 10, required: 5, final: true });
+      // final is mandatory on every answer, not only on a paid one.
+      const none = (await (await q(h(99))).json()) as { status: string; final: boolean };
+      expect(none.status).toBe("not_found");
+      expect(none.final).toBe(false);
     });
   });
 });
