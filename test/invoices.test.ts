@@ -332,5 +332,19 @@ describe("invoice routes", () => {
       expect(body.invoice.explorer).toBe(`${MEZO_TESTNET.explorer}/tx/${h(41)}`);
       expect((await getInvoice(e.INVOICES, MEZO_TESTNET.id, "INV-K"))!.paid?.txHash).toBe(h(41));
     });
+
+    it("reads an invoice whose reference is the word confirm", async () => {
+      const e = env();
+      await createInvoice(e.INVOICES, MEZO_TESTNET, { to: SHOP, amount: "1", memo: "confirm" }, 10);
+      expect((await call(e, "/api/invoices/confirm?chain=31611&check=0")).status).toBe(200);
+    });
+
+    it("/api/verify says how deep a payment is and whether it is final", async () => {
+      const e = env();
+      vi.stubGlobal("fetch", chainWith([{ tx: h(51), block: HEAD - 1, units: 5n * E, memo: "INV-V" }, { tx: h(52), block: HEAD - 9, units: 5n * E, memo: "INV-V" }]));
+      const q = (tx: string) => call(e, `/api/verify?chain=31611&tx=${tx}&to=${SHOP}&amount=5&memo=INV-V`);
+      expect(await (await q(h(51))).json()).toMatchObject({ status: "paid", confirmations: 2, required: 5, final: false });
+      expect(await (await q(h(52))).json()).toMatchObject({ status: "paid", confirmations: 10, required: 5, final: true });
+    });
   });
 });

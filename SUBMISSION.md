@@ -12,25 +12,29 @@ Payment links for MUSD
 
 ## TL;DR
 
-Merchants ask for MUSD with a link, a QR code or a pay page in a chat. Payers check the link before they pay, and a payer who is short of MUSD sees how much BTC would mint it.
+Merchants ask for MUSD with a signed invoice, a link, a QR code or a pay page in a chat. Payers check the link before they pay, the page will not let them pay twice, and a payer who is short of MUSD sees how much BTC would mint it.
 
 ## Short summary
 
-MUSD Pay Links lets anyone request MUSD on Mezo with a standard EIP-681 link. A payer-side TypeScript guard refuses a link unless the token is the real MUSD contract for that chain, the recipient is valid and checksummed, and the amount is within the payer's limit. A payer without enough MUSD gets a borrow quote read from the live MUSD protocol. The merchant finds the payment on chain by its invoice reference.
+MUSD Pay Links lets anyone request MUSD on Mezo with a standard EIP-681 link. A payer-side TypeScript guard refuses a link unless the token is the real MUSD contract for that chain, the recipient is a valid address, and the amount is within the payer's limit. A payer without enough MUSD gets a borrow quote read from the live MUSD protocol. The merchant finds the payment on chain by its invoice reference. The pay page locks itself once a payment for the invoice is on chain.
 
 ## How it works
 
 The problem. Paying someone in MUSD today means copying an address and an amount by hand, or trusting whatever a link or QR code says. A payment link is plain text. One changed character can point it at a fake token, at another chain, at an attacker's address, or at a much larger amount. AI agents that pay for users make this worse, because they act on text they did not write. A second problem is access. A Bitcoin holder who wants to pay in MUSD often holds no MUSD yet.
 
-The merchant creates an invoice for MUSD on Mezo Testnet (31611) or Mezo Mainnet (31612). The Worker saves it, gives it a reference that is unique on that chain, and stamps it with the current block. The merchant gets an EIP-681 link, a QR code and a pay page URL to send in Telegram or any chat. Each link passes through the payer guard before it is shown.
+The merchant creates an invoice for MUSD on Mezo Testnet (31611) or Mezo Mainnet (31612). The wallet that receives the payment signs the invoice (EIP-191, a free message). The signature covers the chain, the recipient, the amount, the reference and the time. So nobody can create invoices for an address they do not control. The Worker saves the invoice, gives it a reference that is unique on that chain, and stamps it with the current block. The merchant gets an EIP-681 link, a QR code and a pay page URL to send in Telegram or any chat. Each link passes through the payer guard before it is shown.
 
-The payer side parses the link strictly. The token must be the MUSD contract for the link's chain id. The recipient must have a correct EIP-55 checksum, and must be on the payer's allowlist when one is set. The amount must be within the payer's limit, with exact integer math at 18 decimals. Unicode tricks, percent-encoding, duplicated or unknown parameters, execution parameters and functions such as `approve` are refused. Every refusal has a code and a plain reason. When all checks pass, the guard returns an unsigned `transfer` call. It never holds a key.
+The payer side parses the link strictly. The token must be the MUSD contract for the link's chain id. The recipient must be a valid address, and must be on the payer's allowlist when one is set. A mixed-case address with a wrong EIP-55 checksum is refused. An address in one case is accepted with a warning, because most link generators write lowercase. The amount must be within the payer's limit, with exact integer math at 18 decimals. Unicode tricks, percent-encoding, duplicated or unknown parameters, execution parameters and functions such as `approve` are refused. Every refusal has a code and a plain reason. When all checks pass, the guard returns an unsigned `transfer` call. It never holds a key.
 
 When the payer is short of MUSD, the page reads the MUSD protocol on Mezo. It reads the BTC price from PriceFeed, MCR, CCR, the minimum debt, the gas compensation and the fee from BorrowerOperations, the interest rate from InterestRateManager, and the system ratio and recovery mode from TroveManager. It then shows the BTC to lock, the debt, the liquidation price and a link to the borrow page of the Mezo app. The payer keeps the Bitcoin and pays in MUSD.
 
-Checking an invoice reads MUSD Transfer logs to the merchant address since the invoice block. It decodes the reference from each payment and marks the invoice paid with the oldest payment that carries the exact reference and covers the amount. The payer does not need to send a hash. A transaction that paid one invoice cannot pay another. A payment from before the invoice block does not count. A payment of the exact amount without a reference shows as a possible match, because some wallets drop the reference. Invoices work on any device and expire after 30 days.
+Checking an invoice reads MUSD Transfer logs to the merchant address since the invoice block. It decodes the reference from each payment and marks the invoice paid with the oldest payment that carries the exact reference and covers the amount. The payer does not need to send a hash. A transaction that paid one invoice cannot pay another. A payment from before the invoice block does not count. A payment of the exact amount without a reference shows as a possible match, because some wallets drop the reference. An invoice is recorded as paid only at 5 confirmations. Before that it shows as confirming, with the depth. The pay page checks the chain when it opens and again right before it sends, and locks Pay when a payment for the invoice exists. A merchant can also record a payment by its hash, for example for an invoice older than the search window of about 23 hours. Invoices work on any device and expire after 30 days.
 
 How MUSD is used and positioned. MUSD is the only asset the product moves. It uses the MUSD token on both Mezo chains and four contracts of the MUSD protocol. The addresses come from the Mezo docs and the official deployment files in github.com/mezo-org/musd. The goal is to make MUSD easy to ask for, safe to pay, and easy to get for a Bitcoin holder who has none yet. Which wallets open these links has not been tested yet.
+
+## Business model
+
+Today the project is free and open source (MIT). It has no customers and no revenue. The plan has two parts. The guard library and the plain links stay free, so wallets and agents can use them. A hosted invoice service for shops gets a flat monthly plan with payment notifications, higher limits and a custom pay page. Payments always go straight from the payer to the merchant. The service never holds funds. The Wave 2 goal is 10 pilot merchants from the Mezo community and the author's network. None is signed today. A shop picks this over a wallet address in a chat for three reasons. The payer's guard stops a changed link. The payment is found by its reference with no hash from the payer. A payer with BTC and no MUSD sees how to mint it on the same page.
 
 ## Target group
 
@@ -73,7 +77,7 @@ The payment was sent from a script. A browser wallet has not paid a link yet.
 | Repository | https://github.com/theluckystrike/musd-pay-links |
 | Pitch deck | https://github.com/theluckystrike/musd-pay-links/blob/main/docs/pitch-deck.pdf |
 | Pitch video | https://youtu.be/T4JLpYwOAoY |
-| Threat model and test output | https://github.com/theluckystrike/musd-pay-links#threat-model |
+| How it protects the money | https://github.com/theluckystrike/musd-pay-links#how-it-protects-the-money |
 | Own borrow transaction (testnet) | https://explorer.test.mezo.org/tx/0x1de64d3a9fe0588d2707718ed3c247d793f5d5f818efd502ae80ee8dc70a26f2 |
 | Own invoice payment (testnet) | https://explorer.test.mezo.org/tx/0x7abfedb120383f817134e5e63823aef69948930fa9760c6b96fb03a87909cc0b |
 | Testnet MUSD contract | https://explorer.test.mezo.org/token/0x118917a40FAF1CD7a13dB0Ef56C86De7973Ac503 |
@@ -81,7 +85,7 @@ The payment was sent from a script. A browser wallet has not paid a link yet.
 
 ## Evidence
 
-262 tests pass, 255 offline and 7 that read Mezo over RPC. One of them verifies the project's own payment on chain. They cover the guard's attack cases, the borrow quote rules, invoices, batched log search, replay by block, the RPC fallback, CORS, the rate limit and the HTTP codes. Contract reads, `eth_call` dry runs and the project's own borrow and payment are in `docs/evidence.json` in the repository.
+293 tests pass, 286 offline and 7 that read Mezo over RPC. One of them verifies the project's own payment on chain. They cover the guard's attack cases, the borrow quote rules, invoices, signed creation (good signature, wrong signer, expired time, replay), the confirmation depth, confirm by hash, a double payment, batched log search, replay by block, the RPC fallback, CORS, the rate limit and the HTTP codes. Contract reads, `eth_call` dry runs and the project's own borrow and payment are in `docs/evidence.json` in the repository.
 
 ## What is next
 

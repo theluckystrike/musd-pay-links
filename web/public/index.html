@@ -88,12 +88,12 @@ footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
     <h1>MUSD Pay Links</h1>
     <span class="muted">Mezo Buildathon, Access and Distribution track</span>
   </header>
-  <p class="lede">A merchant asks for MUSD with a standard EIP-681 link, a QR code or a pay page sent in a chat. Before the payer's wallet or agent builds the transfer, the guard checks that the token is the real MUSD for that chain, that the recipient address is valid and checksummed, and that the amount is within the payer's limit. A payer who is short of MUSD sees how much BTC would mint it in the MUSD protocol. The merchant finds the payment on chain by its invoice reference.</p>
+  <p class="lede">A merchant asks for MUSD with a standard EIP-681 link, a QR code or a pay page sent in a chat. Before the payer's wallet or agent builds the transfer, the guard checks that the token is the real MUSD for that chain, that the recipient address is valid, and that the amount is within the payer's limit. A payer who is short of MUSD sees how much BTC would mint it in the MUSD protocol. The merchant finds the payment on chain by its invoice reference.</p>
   <ol class="steps" id="steps">
     <li>Create an invoice in panel 1. Share the QR code or the pay page.</li>
     <li>Check the link as the payer in panel 2. Try the bad links to see the guard refuse them.</li>
     <li>Short of MUSD? Panel 4 reads the live MUSD protocol and quotes the BTC to lock.</li>
-    <li>Watch for the payment in panel 1, or confirm a transaction hash in panel 3.</li>
+    <li>Watch for the payment in panel 1, or record a transaction hash in panel 3. An invoice is paid at 5 confirmations.</li>
   </ol>
   <div class="banner" id="pay-banner" hidden><strong>You were sent a MUSD payment request.</strong> The guard below checked it in your browser. Set your limit, then pay from your wallet or check your balance first.</div>
 
@@ -152,7 +152,7 @@ footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
 
     <section class="panel wide" aria-labelledby="v-h">
       <h2 id="v-h">3. Merchant, confirm the payment on chain</h2>
-      <p class="sub">Reads the transaction receipt and counts MUSD Transfer events from the real MUSD contract to the address you enter. With a reference, the payment must carry it. With an invoice block, a payment mined earlier is refused. Prefilled with the project's own 5 MUSD payment of invoice INV-65ZVUMXW on Mezo Testnet, made on 26 October 2026. Creating an invoice in panel 1 fills this form with that invoice.</p>
+      <p class="sub">Reads the transaction receipt and counts MUSD Transfer events from the real MUSD contract to the address you enter. With a reference, the payment must carry it. With an invoice block, a payment mined earlier is refused. A payment is final at 5 confirmations. With a reference, "Record invoice as paid" saves the payment in that invoice, checked against the stored invoice. Prefilled with the project's own 5 MUSD payment of invoice INV-65ZVUMXW on Mezo Testnet, made on 26 October 2026. Creating an invoice in panel 1 fills this form with that invoice.</p>
       <div class="row">
         <div style="flex:3 1 320px"><label for="v-tx">Transaction hash</label><input id="v-tx" spellcheck="false" value="0x7abfedb120383f817134e5e63823aef69948930fa9760c6b96fb03a87909cc0b"></div>
         <div><label for="v-chain">Network</label><select id="v-chain"><option value="31611">Mezo Testnet</option><option value="31612">Mezo Mainnet</option></select></div>
@@ -182,7 +182,7 @@ footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
 
   <footer>
     Open source under the MIT license at <a href="https://github.com/theluckystrike/musd-pay-links">github.com/theluckystrike/musd-pay-links</a>.
-    JSON API at <code>/api/check</code>, <code>/api/link</code>, <code>/api/verify</code>, <code>/api/payments</code>, <code>/api/borrow</code>, <code>/api/token</code>. Built by Michael Lip, Warsaw, Poland.
+    JSON API at <code>/api/check</code>, <code>/api/link</code>, <code>/api/invoices</code>, <code>/api/verify</code>, <code>/api/payments</code>, <code>/api/borrow</code>, <code>/api/token</code>. Built by Michael Lip, Warsaw, Poland.
   </footer>
 </main>
 <script type="module" src="/client.js"></script>
