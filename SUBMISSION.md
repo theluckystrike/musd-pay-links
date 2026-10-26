@@ -68,6 +68,8 @@ On 26 October 2026 the project made its own payment on Mezo Testnet, end to end.
 4. Confirm. The invoice check found the payment by its reference, with no hash from the payer. The merchant inbox and the verify route also return paid. The verify route always returns final. It is false until 5 confirmations.
 5. Signed invoice. The merchant key signed invoice INV-P92MNPCN for 1 MUSD. A 1 MUSD payment followed (https://explorer.test.mezo.org/tx/0x9b8285c19033cc957932406347234a8b339e85fc2c1848fb672f522dd10a825c). Confirm by hash answered confirming at 3 of 5 confirmations, then paid. An unsigned create gets 401. A replay of the signed request gets 409.
 
+6. Duplicate payment. On 26 Oct a second 5 MUSD payment with the same reference went to the paid invoice INV-65ZVUMXW (https://explorer.test.mezo.org/tx/0x95ef25c8d2f3dec854e8203e3122ec6694f12153d2d21b7f5945669a7c902dc4). The invoice API lists it under duplicates with refund due. The invoice still counts the first payment only.
+
 The payments were sent from scripts. A browser wallet has not paid a link yet.
 
 ## Links

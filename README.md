@@ -19,6 +19,7 @@ Testnet only. No real money. Each row was checked on chain or on the live Worker
 | Invoice found by its reference, no hash given | live `GET /api/invoices/INV-65ZVUMXW` | `paid` |
 | Signed invoice `INV-P92MNPCN`, made by `pnpm create-invoice` with the merchant key | live `POST /api/invoices` | 201, `signed: true`. Unsigned create gives 401 |
 | Payment of that invoice, then `POST .../confirm` | [`0x9b8285c1...825c`](https://explorer.test.mezo.org/tx/0x9b8285c19033cc957932406347234a8b339e85fc2c1848fb672f522dd10a825c) | `confirming` at 3 of 5 confirmations, then `paid` |
+| A second 5 MUSD payment to the paid invoice `INV-65ZVUMXW` | [`0x95ef25c8...2dc4`](https://explorer.test.mezo.org/tx/0x95ef25c8d2f3dec854e8203e3122ec6694f12153d2d21b7f5945669a7c902dc4) | listed under `duplicates`, refund due |
 | Same payment with a wrong reference or a later invoice block | live `/api/verify` | `mismatch` |
 | MUSD contracts on testnet and mainnet | `name()`, `symbol()`, `decimals()` | "Mezo USD", "MUSD", 18 |
 | Borrow quote from the live MUSD protocol | PriceFeed, TroveManager, BorrowerOperations, InterestRateManager | price, MCR, CCR, fee, minimum debt |
