@@ -33,7 +33,7 @@ The payer and the merchant are both test addresses of the project. The payments 
 3. The payer's guard checks the link. The token must be the real MUSD contract for the chain id. The recipient must be a valid address. The amount must be within the payer's limit. Every refusal has a code and a plain reason. The guard returns an unsigned `transfer` call. It never holds a key.
 4. A payer who is short of MUSD sees how much BTC would mint it in the MUSD protocol. The page links to the borrow page of the Mezo app.
 5. The Worker finds the payment on chain by its reference. The payer does not send a hash.
-6. A wallet may drop the reference. Such a payment shows as a possible match. The invoice recipient signs an accept request that names the reference and the transaction hash. The watch panel offers an **Accept this payment** button when the connected wallet is the invoice recipient. The invoice is then recorded as paid with `referenceMissing: true`.
+6. A wallet may drop the reference. Such a payment shows as a possible match. The invoice recipient signs an accept request that names the reference and the transaction hash. The watch panel offers an **Accept this payment** button. It asks for the invoice recipient's wallet and signs a message. The invoice is then recorded as paid with `referenceMissing: true`.
 
 ## How it protects the money
 
@@ -82,7 +82,7 @@ The amount is in base units (12.5 MUSD here). The `memo` is up to 32 characters.
 | `GET /api/payments?chain=31611&to=0x...` | Merchant inbox. `matches` and `possible` are `null` when not evaluated |
 | `GET /api/borrow?chain=31611&need=25` | Borrow quote from the live MUSD protocol |
 
-HTTP codes follow the answer. 200 for `paid`, `paid_no_memo`, `confirming`, `open` and `pending`. 401 for a bad signature. 404 for `not_found`. 409 for a used reference or transaction, and for a second payment of a paid invoice (`already_paid`). 422 for `mismatch`, `failed` and `not_possible` (a transaction that carries the reference). 503 when the network does not answer. Errors never contain internal detail.
+HTTP codes follow the answer. 200 for `paid`, `paid_no_memo`, `confirming`, `open` and `pending`. 401 for a bad signature. 404 for `not_found`. 409 for a used reference or transaction, and for a second payment of a paid invoice (`already_paid`). 422 for `mismatch`, `failed` and `not_possible` (a transaction for the other action, with or without the reference). 503 when the network does not answer. Errors never contain internal detail.
 
 Chain routes send no CORS header. They allow 30 calls a minute per client. Writes allow 10 a minute. A Durable Object keeps the exact count.
 

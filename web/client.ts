@@ -543,7 +543,8 @@ async function acceptPossible(chainId: number, memo: string, tx: string, to: str
       out.innerHTML = renderInvoiceAnswer(result);
       if (result.status === "paid") void loadInvoices();
     } else {
-      out.innerHTML = `<div class="verdict bad"><strong>Not accepted.</strong> ${esc(result.message ?? result.error ?? "The network did not answer.")}</div>`;
+      const why = result.reasons?.map((r) => r.message).filter(Boolean).join(" ") || result.message || result.error || "The network did not answer.";
+      out.innerHTML = `<div class="verdict bad"><strong>Not accepted.</strong> ${esc(why)}</div>`;
     }
   } catch (e) {
     out.innerHTML = `<div class="verdict bad"><strong>Not accepted.</strong> ${esc((e as Error).message ?? String(e))}</div>`;
