@@ -66,8 +66,9 @@ On 26 October 2026 the project made its own payment on Mezo Testnet, end to end.
 2. Invoice. The live Worker created invoice INV-65ZVUMXW for 5 MUSD to a merchant test address.
 3. Pay. The script checked the link with the guard and sent 5 MUSD with the reference. Transaction https://explorer.test.mezo.org/tx/0x7abfedb120383f817134e5e63823aef69948930fa9760c6b96fb03a87909cc0b
 4. Confirm. The invoice check found the payment by its reference, with no hash from the payer. The merchant inbox and the verify route also return paid.
+5. Signed invoice. The merchant key signed invoice INV-P92MNPCN for 1 MUSD. A 1 MUSD payment followed (https://explorer.test.mezo.org/tx/0x9b8285c19033cc957932406347234a8b339e85fc2c1848fb672f522dd10a825c). Confirm by hash answered confirming at 3 of 5 confirmations, then paid. An unsigned create gets 401. A replay of the signed request gets 409.
 
-The payment was sent from a script. A browser wallet has not paid a link yet.
+The payments were sent from scripts. A browser wallet has not paid a link yet.
 
 ## Links
 

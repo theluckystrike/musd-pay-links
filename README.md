@@ -17,12 +17,14 @@ Testnet only. No real money. Each row was checked on chain or on the live Worker
 | Own borrow. `pnpm testnet-borrow` opens a trove | [`0x1de64d3a...26f2`](https://explorer.test.mezo.org/tx/0x1de64d3a9fe0588d2707718ed3c247d793f5d5f818efd502ae80ee8dc70a26f2) | 0.049 test BTC locked, 1,800 MUSD minted, block 16370809 |
 | Own payment of invoice `INV-65ZVUMXW` | [`0x7abfedb1...cc0b`](https://explorer.test.mezo.org/tx/0x7abfedb120383f817134e5e63823aef69948930fa9760c6b96fb03a87909cc0b) | 5 MUSD with the reference in the transfer data, block 16370829 |
 | Invoice found by its reference, no hash given | live `GET /api/invoices/INV-65ZVUMXW` | `paid` |
+| Signed invoice `INV-P92MNPCN`, made by `pnpm create-invoice` with the merchant key | live `POST /api/invoices` | 201, `signed: true`. Unsigned create gives 401 |
+| Payment of that invoice, then `POST .../confirm` | [`0x9b8285c1...825c`](https://explorer.test.mezo.org/tx/0x9b8285c19033cc957932406347234a8b339e85fc2c1848fb672f522dd10a825c) | `confirming` at 3 of 5 confirmations, then `paid` |
 | Same payment with a wrong reference or a later invoice block | live `/api/verify` | `mismatch` |
 | MUSD contracts on testnet and mainnet | `name()`, `symbol()`, `decimals()` | "Mezo USD", "MUSD", 18 |
 | Borrow quote from the live MUSD protocol | PriceFeed, TroveManager, BorrowerOperations, InterestRateManager | price, MCR, CCR, fee, minimum debt |
 | Tests | `LIVE=1 pnpm test` on 26 October 2026 | 295 of 295 passed |
 
-The payer and the merchant are both test addresses of the project. The payment came from a script. No browser wallet has paid a link yet.
+The payer and the merchant are both test addresses of the project. The payments came from scripts. No browser wallet has paid a link yet.
 
 ## What it does
 
