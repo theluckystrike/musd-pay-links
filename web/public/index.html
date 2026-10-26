@@ -106,7 +106,7 @@ footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
   <div class="grid" style="margin-top:16px">
     <section class="panel" id="m-panel" aria-labelledby="m-h">
       <h2 id="m-h">1. Merchant, request MUSD</h2>
-      <p class="sub">Saves an invoice with a unique reference, stamps it with the current block, and gives you the link, the QR code and a pay page. The link is run through the payer guard before it is shown.</p>
+      <p class="sub">Saves an invoice with a unique reference, stamps it with the current block, and gives you the link, the QR code and a pay page. The wallet of the recipient signs the invoice (a free message, not a transaction), so nobody can create invoices for your address. The link is run through the payer guard before it is shown.</p>
       <label for="m-chain">Network</label>
       <select id="m-chain">
         <option value="31611">Mezo Testnet (31611)</option>

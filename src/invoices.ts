@@ -27,6 +27,8 @@ export interface StoredInvoice {
   createdAt: string;
   link: string;
   paid?: { txHash: string; block: number; from: string; amount: string; at: string };
+  /** true when the recipient wallet signed the create request (src/auth.ts). Older invoices have no flag. */
+  signed?: boolean;
 }
 
 /** Invoices and their index expire after 30 days. */
@@ -59,7 +61,7 @@ export type CreateInvoiceResult = { ok: true; invoice: StoredInvoice } | { ok: f
 export async function createInvoice(
   kv: KV,
   chain: MezoChain,
-  input: { to: string; amount: string; memo?: string | null },
+  input: { to: string; amount: string; memo?: string | null; signed?: boolean },
   head: number,
   now: Date = new Date(),
   random?: (n: number) => Uint8Array,
@@ -79,6 +81,7 @@ export async function createInvoice(
     fromBlock: head,
     createdAt: now.toISOString(),
     link: r.link,
+    ...(input.signed ? { signed: true } : {}),
   };
   await kv.put(invKey(chain.id, memo), JSON.stringify(invoice), { expirationTtl: INVOICE_TTL_SECONDS });
   const idx = JSON.parse((await kv.get(idxKey(chain.id, invoice.to))) ?? "[]") as string[];

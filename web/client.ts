@@ -1,13 +1,15 @@
 // Browser side of the demo. Uses the same library as the API; nothing is checked only on the server.
 
-import { getAddress } from "viem";
+import { getAddress, stringToHex } from "viem";
 
 import { formatAmount, parseAmount } from "../src/amount.ts";
+import { invoiceMessage } from "../src/auth.ts";
 import { pct } from "../src/borrow.ts";
 import { chainById, CONFIRMATIONS_REQUIRED, MEZO_TESTNET } from "../src/chains.ts";
 import { checkPaymentLink, type CheckResult } from "../src/guard.ts";
 import { createPaymentLink } from "../src/merchant.ts";
 import { payPageLock } from "../src/paystate.ts";
+import { newReference } from "../src/invoices.ts";
 import { qrSvg } from "../src/qr.ts";
 
 const $ = <T = HTMLInputElement>(id: string) => document.getElementById(id) as unknown as T;
@@ -99,7 +101,7 @@ function runCheck(): void {
 // Invoices live in the Worker's KV store, so they survive a reload and work on another device.
 interface ServerInvoice {
   chainId: number; to: string; amount: string; units: string; memo: string; fromBlock: number; createdAt: string; link: string;
-  payUrl: string; explorer: string | null; paid?: { txHash: string; block: number; from: string; amount: string };
+  payUrl: string; explorer: string | null; signed?: boolean; paid?: { txHash: string; block: number; from: string; amount: string };
 }
 interface InvoiceAnswer {
   status: string; checked?: boolean; http?: number; invoice?: ServerInvoice; possible?: InboxPayment[]; clamped?: boolean; truncated?: boolean; head?: number; message?: string; error?: string;
@@ -122,7 +124,7 @@ async function loadInvoices(): Promise<void> {
       return;
     }
     box.innerHTML = `<table class="inv"><thead><tr><th>Reference</th><th>MUSD</th><th>Status</th><th></th></tr></thead><tbody>${v.invoices
-      .map((x, i) => `<tr><td class="mono-cell"><a href="${esc(x.payUrl)}" target="_blank" rel="noopener">${esc(x.memo)}</a></td><td>${esc(x.amount)}</td><td id="inv-st-${i}">${x.paid && x.explorer ? `<a href="${esc(x.explorer)}" target="_blank" rel="noopener">paid</a>` : "open"}</td><td>${x.paid ? "" : `<button class="ghost small" data-memo="${esc(x.memo)}" data-i="${i}">Check</button>`}</td></tr>`)
+      .map((x, i) => `<tr><td class="mono-cell"><a href="${esc(x.payUrl)}" target="_blank" rel="noopener">${esc(x.memo)}</a></td><td>${esc(x.amount)}${x.signed ? "" : ` <span class="muted" title="Made before invoices were signed (26 October 2026)">unsigned</span>`}</td><td id="inv-st-${i}">${x.paid && x.explorer ? `<a href="${esc(x.explorer)}" target="_blank" rel="noopener">paid</a>` : "open"}</td><td>${x.paid ? "" : `<button class="ghost small" data-memo="${esc(x.memo)}" data-i="${i}">Check</button>`}</td></tr>`)
       .join("")}</tbody></table>`;
     box.querySelectorAll<HTMLButtonElement>("button[data-memo]").forEach((b) => {
       b.onclick = async () => {
@@ -169,21 +171,46 @@ async function runCreate(fillVerify = true): Promise<void> {
   }
   if (!fillVerify) {
     // First paint: show a preview without writing an invoice.
-    $("m-out").innerHTML = `<div class="muted">Press "Create invoice" to save an invoice with a fresh reference and get its pay page.</div>
+    $("m-out").innerHTML = `<div class="muted">Press "Create invoice" to save an invoice with a fresh reference and get its pay page. Your wallet signs it as the recipient.</div>
       <div class="qr" role="img" aria-label="QR code preview">${qrSvg(local.link)}</div>`;
     return;
   }
-  $("m-out").innerHTML = `<div class="muted">Saving the invoice and stamping it with the current block...</div>`;
+  // Only the wallet that receives the payment can save an invoice for it. It signs a message (free, no transaction).
+  const eth = (window as unknown as { ethereum?: Eip1193 }).ethereum;
+  if (!eth) {
+    $("m-out").innerHTML = `<div class="verdict bad"><strong>Saving an invoice needs a browser wallet that holds the recipient address.</strong> The wallet signs a message. It sends no transaction and costs nothing. Without a wallet you can still use this plain link and QR code. It is not saved and has no invoice page.</div>
+      <div class="mono">${esc(local.link)}</div><div class="qr" role="img" aria-label="QR code of the plain link">${qrSvg(local.link)}</div>`;
+    return;
+  }
   let a: InvoiceAnswer & { ok?: boolean; qrSvg?: string };
   try {
+    const [account] = (await eth.request({ method: "eth_requestAccounts" })) as string[];
+    if (!account || account.toLowerCase() !== local.payment.recipient.toLowerCase()) {
+      const mine = account ? getAddress(account) : "";
+      $("m-out").innerHTML = `<div class="verdict bad"><strong>Only the recipient can save this invoice.</strong> Your wallet is ${esc(mine || "not connected")}. The recipient is ${esc(local.payment.recipient)}.
+        ${mine ? `<div class="actions"><button class="ghost" id="m-use-mine" type="button">Use my wallet address</button></div>` : ""}</div>`;
+      const use = document.getElementById("m-use-mine");
+      if (use) use.onclick = () => {
+        $("m-to").value = mine;
+        void loadInvoices();
+        void runCreate();
+      };
+      return;
+    }
+    const memo = memoEdited ? $("m-memo").value.trim() : newReference();
+    const claim = { chainId, to: local.payment.recipient, amount: local.payment.amountText, memo, timestamp: Math.floor(Date.now() / 1000) };
+    $("m-out").innerHTML = `<div class="muted">Sign the invoice in your wallet. It is a message, not a transaction.</div>`;
+    const signature = (await eth.request({ method: "personal_sign", params: [stringToHex(invoiceMessage(claim)), account] })) as string;
+    $("m-out").innerHTML = `<div class="muted">Saving the invoice and stamping it with the current block...</div>`;
     const res = await fetch("/api/invoices", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ chain: chainId, to: $("m-to").value.trim(), amount: $("m-amount").value.trim(), memo: memoEdited ? $("m-memo").value.trim() : null }),
+      body: JSON.stringify({ chain: chainId, to: claim.to, amount: claim.amount, memo, timestamp: claim.timestamp, signature }),
     });
     a = (await res.json()) as typeof a;
-  } catch {
-    a = { status: "unavailable", error: "The network did not answer." };
+  } catch (e) {
+    const msg = (e as { message?: string }).message;
+    a = { status: "unavailable", error: msg ? `Not saved. ${msg}` : "The network did not answer." };
   }
   if (!a.ok || !a.invoice) {
     const reasons = a.reasons ?? [{ code: "unavailable", message: a.error ?? a.message ?? "The invoice was not saved." }];

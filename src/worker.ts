@@ -1,7 +1,9 @@
-// Cloudflare Worker: serves the demo page (static assets) and a small read-only JSON API.
-// No keys, no signing, no stored state. Every chain read goes to a public Mezo RPC.
+// Cloudflare Worker: serves the demo page (static assets) and a small JSON API.
+// It holds no keys and signs nothing. Invoices are kept in KV. Creating one needs a signature by the
+// recipient wallet (src/auth.ts). Every chain read goes to a public Mezo RPC.
 
 import { checkAddress } from "./address.ts";
+import { checkInvoiceSignature } from "./auth.ts";
 import { parseAmount } from "./amount.ts";
 import { chainById, CONFIRMATIONS_REQUIRED, MEZO_CHAINS, type MezoChain } from "./chains.ts";
 import { checkPaymentLink } from "./guard.ts";
@@ -113,6 +115,8 @@ function publicInvoice(inv: StoredInvoice, origin: string) {
   const c = chainById(inv.chainId)!;
   return {
     ...inv,
+    /** false for invoices made before signed creation (26 October 2026). They stay readable. */
+    signed: inv.signed === true,
     payUrl: `${origin}/?invoice=${encodeURIComponent(inv.memo)}&chain=${inv.chainId}`,
     explorer: inv.paid ? `${c.explorer}/tx/${inv.paid.txHash}` : null,
   };
@@ -157,16 +161,23 @@ async function invoices(req: Request, url: URL, env: Env): Promise<Response> {
   const p = url.searchParams;
   const rest = url.pathname.slice("/api/invoices".length);
   if (req.method === "POST" && rest === "") {
-    let body: { chain?: unknown; to?: unknown; amount?: unknown; memo?: unknown };
+    let body: { chain?: unknown; to?: unknown; amount?: unknown; memo?: unknown; timestamp?: unknown; signature?: unknown };
     try {
       body = (await req.json()) as typeof body;
     } catch {
-      return bad("Send a JSON body, for example {\"chain\":31611,\"to\":\"0x...\",\"amount\":\"12.5\"}");
+      return bad("Send a JSON body, for example {\"chain\":31611,\"to\":\"0x...\",\"amount\":\"12.5\",\"memo\":\"INV-1\",\"timestamp\":1793000000,\"signature\":\"0x...\"}");
     }
+    if (body === null || typeof body !== "object") return bad("Send a JSON object.");
     const chain = chainById(Number(body.chain ?? 31611));
     if (!chain) return bad("chain must be 31611 or 31612");
+    const memo = typeof body.memo === "string" ? body.memo.trim() : "";
+    const pre = createPaymentLink({ chainId: chain.id, recipient: String(body.to ?? ""), amount: String(body.amount ?? ""), memo: memo || undefined });
+    if (!pre.ok) return json({ ok: false, reasons: pre.reasons }, 422);
+    if (!memo) return json({ ok: false, reasons: [{ code: "memo_required", message: "A signed invoice needs its reference in the request, because the signature covers it." }] }, 400);
+    const auth = await checkInvoiceSignature({ chainId: chain.id, to: pre.payment.recipient, amount: pre.payment.amountText, memo, timestamp: body.timestamp }, body.signature);
+    if (!auth.ok) return json({ ok: false, reasons: [{ code: auth.code, message: auth.message }] }, 401);
     const head = await headBlock(chain);
-    const r = await createInvoice(kv, chain, { to: String(body.to ?? ""), amount: String(body.amount ?? ""), memo: body.memo == null ? null : String(body.memo) }, head);
+    const r = await createInvoice(kv, chain, { to: pre.payment.recipient, amount: pre.payment.amountText, memo, signed: true }, head);
     if (!r.ok) return json({ ok: false, reasons: r.reasons }, r.status);
     return json({ ok: true, invoice: publicInvoice(r.invoice, url.origin), qrSvg: qrSvg(r.invoice.link) }, 201);
   }

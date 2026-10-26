@@ -6,3 +6,5 @@ export * from "./guard.ts";
 export * from "./merchant.ts";
 export * from "./rpc.ts";
 export * from "./borrow.ts";
+export * from "./auth.ts";
+export { newReference } from "./invoices.ts";
