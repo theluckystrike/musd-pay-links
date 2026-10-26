@@ -27,6 +27,15 @@ id = "e85bb8a979d544e68fa808c13dd35217"
 name = "CLIENT_LIMITER"
 class_name = "ClientLimiter"
 
+# Source of truth for invoice reference and transaction claims (see InvoiceStoreDO in src/claims.ts).
+[[durable_objects.bindings]]
+name = "INVOICE_STORE"
+class_name = "InvoiceStoreDO"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["ClientLimiter"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["InvoiceStoreDO"]

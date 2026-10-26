@@ -11,16 +11,13 @@ import { createPaymentLink } from "./merchant.ts";
 import { qrSvg } from "./qr.ts";
 import { quoteBorrow, readBorrowTerms, type BorrowTerms } from "./borrow.ts";
 import { checkInvoice, confirmInvoice, createInvoice, getInvoice, listInvoices, type KV, type StoredInvoice } from "./invoices.ts";
+import { claimsFor, type DONamespace } from "./claims.ts";
+export { InvoiceStoreDO } from "./claims.ts";
 import { MEMO_PATTERN } from "./eip681.ts";
 import { findPayments, headBlock, readBalance, readTokenInfo, rpc, verifyPayment, type TokenInfo } from "./rpc.ts";
 
 interface RateLimiter {
   limit(opts: { key: string }): Promise<{ success: boolean }>;
-}
-
-interface DONamespace {
-  idFromName(name: string): unknown;
-  get(id: unknown): { fetch(req: Request): Promise<Response> };
 }
 
 /**
@@ -53,6 +50,8 @@ interface Env {
   INVOICES?: KV;
   /** Exact per-client limiter, see ClientLimiter. Optional so tests and dev run without it. */
   CLIENT_LIMITER?: DONamespace;
+  /** Atomic invoice claims, see InvoiceStoreDO. Optional so tests and dev run without it. */
+  INVOICE_STORE?: DONamespace;
 }
 
 const JSON_HEADERS = {
@@ -171,6 +170,7 @@ async function invoices(req: Request, url: URL, env: Env): Promise<Response> {
     if (body === null || typeof body !== "object") return bad("Send a JSON object.");
     const chain = chainById(Number(body.chain ?? 31611));
     if (!chain) return bad("chain must be 31611 or 31612");
+    const claims = claimsFor(env.INVOICE_STORE, chain.id);
     const memo = typeof body.memo === "string" ? body.memo.trim() : "";
     const pre = createPaymentLink({ chainId: chain.id, recipient: String(body.to ?? ""), amount: String(body.amount ?? ""), memo: memo || undefined });
     if (!pre.ok) return json({ ok: false, reasons: pre.reasons }, 422);
@@ -178,18 +178,19 @@ async function invoices(req: Request, url: URL, env: Env): Promise<Response> {
     const auth = await checkInvoiceSignature({ chainId: chain.id, to: pre.payment.recipient, amount: pre.payment.amountText, memo, timestamp: body.timestamp }, body.signature);
     if (!auth.ok) return json({ ok: false, reasons: [{ code: auth.code, message: auth.message }] }, 401);
     const head = await headBlock(chain);
-    const r = await createInvoice(kv, chain, { to: pre.payment.recipient, amount: pre.payment.amountText, memo, signed: true }, head);
+    const r = await createInvoice(kv, chain, { to: pre.payment.recipient, amount: pre.payment.amountText, memo, signed: true }, head, new Date(), undefined, claims);
     if (!r.ok) return json({ ok: false, reasons: r.reasons }, r.status);
     return json({ ok: true, invoice: publicInvoice(r.invoice, url.origin), qrSvg: qrSvg(r.invoice.link) }, 201);
   }
   if (req.method !== "GET" && req.method !== "POST") return bad("GET or POST only", 405);
   const chain = chainParam(url);
   if (!chain) return bad("chain must be 31611 or 31612");
+  const claims = claimsFor(env.INVOICE_STORE, chain.id);
   if (rest === "") {
     if (req.method !== "GET") return bad("GET or POST only", 405);
     const to = checkAddress(p.get("to") ?? "", false);
     if (!to.ok) return bad(to.message);
-    const list = await listInvoices(kv, chain.id, to.address);
+    const list = await listInvoices(kv, chain.id, to.address, claims);
     return json({ chainId: chain.id, to: to.address, invoices: list.map((i) => publicInvoice(i, url.origin)) });
   }
   const confirm = rest.endsWith("/confirm") && rest.length > "/confirm".length;
@@ -201,7 +202,7 @@ async function invoices(req: Request, url: URL, env: Env): Promise<Response> {
   }
   if (!MEMO_PATTERN.test(memo)) return bad("Not an invoice reference.");
   if (confirm !== (req.method === "POST")) return bad(confirm ? "POST a JSON body {\"tx\":\"0x...\"} to confirm an invoice." : "GET only", 405);
-  const inv = await getInvoice(kv, chain.id, memo);
+  const inv = await getInvoice(kv, chain.id, memo, claims);
   if (!inv) return bad(`No invoice ${memo} on ${chain.name}.`, 404);
   if (confirm) {
     let tx: unknown;
@@ -211,11 +212,11 @@ async function invoices(req: Request, url: URL, env: Env): Promise<Response> {
       return bad("Send a JSON body, for example {\"tx\":\"0x...\"}");
     }
     if (typeof tx !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(tx)) return bad("tx must be a transaction hash (0x and 64 hex characters).");
-    const c = await confirmInvoice(kv, chain, inv, tx);
+    const c = await confirmInvoice(kv, chain, inv, tx, undefined, new Date(), claims);
     return json(confirmAnswer(c, url.origin), statusCode(c.status));
   }
   if (p.get("check") === "0") return json({ status: inv.paid ? "paid" : "open", invoice: publicInvoice(inv, url.origin), checked: false });
-  const c = await checkInvoice(kv, chain, inv);
+  const c = await checkInvoice(kv, chain, inv, undefined, new Date(), claims);
   const extra =
     c.status === "open" ? {
       clamped: c.inbox.clamped,
@@ -388,7 +389,8 @@ export default {
             exact = null; // the limiter itself failed, do not block the call
           }
         }
-        const bound = local && exact !== false && env.LIMITER ? (await env.LIMITER.limit({ key })).success : null;
+        // The kind prefix keeps the read, create and confirm budgets apart, as the comment and README say.
+        const bound = local && exact !== false && env.LIMITER ? (await env.LIMITER.limit({ key: kind + ":" + key })).success : null;
         const allowed = local && exact !== false && bound !== false;
         if (!allowed) return json({ error: `Too many requests. The limit is ${rule.limit} a minute per client for this kind of call.` }, 429, { "retry-after": String(rule.periodSeconds) });
       }

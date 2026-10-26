@@ -107,7 +107,21 @@ describe("worker API (no network routes)", () => {
     const bound = { ...env, LIMITER: { limit: async ({ key }: { key: string }) => (keys.push(key), { success: false }) } };
     const res = await worker.fetch(new Request("https://x.test/api/head?chain=31611", { headers: { "cf-connecting-ip": "192.0.2.1" } }), bound);
     expect(res.status).toBe(429);
-    expect(keys).toEqual(["192.0.2.1"]);
+    expect(keys).toEqual(["read:192.0.2.1"]);
+  });
+
+  it("prefixes the Cloudflare limiter key with the call kind, so the budgets stay apart", async () => {
+    const keys: string[] = [];
+    const bound = {
+      ...env,
+      INVOICES: { get: async () => null, put: async () => {} },
+      LIMITER: { limit: async ({ key }: { key: string }) => (keys.push(key), { success: true }) },
+    };
+    const ip = { "cf-connecting-ip": "192.0.2.77" };
+    await worker.fetch(new Request("https://x.test/api/head?chain=7", { headers: ip }), bound);
+    await worker.fetch(new Request("https://x.test/api/invoices", { method: "POST", headers: ip, body: "{nope" }), bound);
+    await worker.fetch(new Request("https://x.test/api/invoices/INV-X/confirm", { method: "POST", headers: ip, body: "{}" }), bound);
+    expect(keys).toEqual(["read:192.0.2.77", "create:192.0.2.77", "confirm:192.0.2.77"]);
   });
 
   it("gives no explorer link for a malformed hash", async () => {

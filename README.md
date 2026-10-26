@@ -42,6 +42,7 @@ The payer and the merchant are both test addresses of the project. The payments 
 - `GET /api/verify` always returns `final`. It is `false` until the payment reaches 5 confirmations, and the pay page shows `Confirming` until `final` is `true`.
 - `POST /api/invoices/:memo/confirm` with `{"tx":"0x..."}` records a payment by hash. It checks the stored invoice, not the caller. Use it for invoices older than the search window of about 23 hours.
 - One transaction pays one invoice. A payment mined before the invoice block does not count. The reference must match exactly.
+- Reference claims and paid transaction hashes are compare-and-set in a Durable Object per chain, so concurrent creates cannot share a reference and one transaction cannot pay two invoices.
 - Only the recipient wallet can create invoices for its address. The signature covers chain, recipient, amount, reference and time. The time must be within 10 minutes. A replay gets 409, because the reference is already used.
 - A recipient address in one case (no EIP-55 checksum) is accepted with the warning `recipient_no_checksum`. A mixed-case address with a wrong checksum is refused.
 

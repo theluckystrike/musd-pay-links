@@ -6,6 +6,7 @@
 // The store holds only what is public on chain anyway (address, amount, reference, transaction hash).
 
 import { CONFIRMATIONS_REQUIRED, type MezoChain } from "./chains.ts";
+import { type InvoiceClaims, type Paid } from "./claims.ts";
 import { type Reason } from "./eip681.ts";
 import { createPaymentLink } from "./merchant.ts";
 import { findPayments, verifyPayment, type Fetch, type FindResult } from "./rpc.ts";
@@ -47,16 +48,34 @@ const invKey = (chainId: number, memo: string) => `inv:${chainId}:${memo}`;
 const idxKey = (chainId: number, to: string) => `idx:${chainId}:${to.toLowerCase()}`;
 const txKey = (chainId: number, hash: string) => `tx:${chainId}:${hash.toLowerCase()}`;
 
-export async function getInvoice(kv: KV, chainId: number, memo: string): Promise<StoredInvoice | null> {
+/**
+ * Read an invoice. The Durable Object store is the source of truth. When it has no record (an invoice
+ * made before the store existed), the KV copy is read and copied into the store, so old invoices stay
+ * readable and are claimed atomically from then on.
+ */
+export async function getInvoice(kv: KV, chainId: number, memo: string, claims?: InvoiceClaims): Promise<StoredInvoice | null> {
+  if (claims) {
+    const stored = await claims.get(chainId, memo);
+    if (stored) return stored;
+  }
   const raw = await kv.get(invKey(chainId, memo));
-  return raw ? (JSON.parse(raw) as StoredInvoice) : null;
+  const invoice = raw ? (JSON.parse(raw) as StoredInvoice) : null;
+  if (invoice && claims) return await claims.import(chainId, invoice);
+  return invoice;
 }
 
 export type CreateInvoiceResult = { ok: true; invoice: StoredInvoice } | { ok: false; status: number; reasons: Reason[] };
 
+const referenceTaken = (memo: string, chain: MezoChain): CreateInvoiceResult => ({
+  ok: false,
+  status: 409,
+  reasons: [{ code: "reference_taken", message: `The reference ${memo} is already used by another invoice on ${chain.name}. Leave it empty to get a fresh one.` }],
+});
+
 /**
  * Create an invoice. `head` is the current block, read by the caller. A reference that is already
- * taken on this chain is refused with status 409, so one reference always means one invoice.
+ * taken on this chain is refused with status 409, so one reference always means one invoice. When a
+ * claims store is present, the check and the write are one atomic compare-and-set in a Durable Object.
  */
 export async function createInvoice(
   kv: KV,
@@ -65,13 +84,13 @@ export async function createInvoice(
   head: number,
   now: Date = new Date(),
   random?: (n: number) => Uint8Array,
+  claims?: InvoiceClaims,
 ): Promise<CreateInvoiceResult> {
   const memo = input.memo?.trim() || newReference(random);
   const r = createPaymentLink({ chainId: chain.id, recipient: input.to, amount: input.amount, memo });
   if (!r.ok) return { ok: false, status: 422, reasons: r.reasons };
-  if (await kv.get(invKey(chain.id, memo))) {
-    return { ok: false, status: 409, reasons: [{ code: "reference_taken", message: `The reference ${memo} is already used by another invoice on ${chain.name}. Leave it empty to get a fresh one.` }] };
-  }
+  // Also finds a KV-only invoice and copies it into the store before the claim, so an old reference is not taken twice.
+  if (await getInvoice(kv, chain.id, memo, claims)) return referenceTaken(memo, chain);
   const invoice: StoredInvoice = {
     chainId: chain.id,
     to: r.payment.recipient,
@@ -83,15 +102,19 @@ export async function createInvoice(
     link: r.link,
     ...(input.signed ? { signed: true } : {}),
   };
+  if (claims) {
+    const claim = await claims.create(chain.id, invoice);
+    if (claim.status === "taken") return referenceTaken(memo, chain);
+  }
   await kv.put(invKey(chain.id, memo), JSON.stringify(invoice), { expirationTtl: INVOICE_TTL_SECONDS });
   const idx = JSON.parse((await kv.get(idxKey(chain.id, invoice.to))) ?? "[]") as string[];
   await kv.put(idxKey(chain.id, invoice.to), JSON.stringify([memo, ...idx.filter((m) => m !== memo)].slice(0, MAX_LISTED)), { expirationTtl: INVOICE_TTL_SECONDS });
   return { ok: true, invoice };
 }
 
-export async function listInvoices(kv: KV, chainId: number, to: string): Promise<StoredInvoice[]> {
+export async function listInvoices(kv: KV, chainId: number, to: string, claims?: InvoiceClaims): Promise<StoredInvoice[]> {
   const idx = JSON.parse((await kv.get(idxKey(chainId, to))) ?? "[]") as string[];
-  const all = await Promise.all(idx.slice(0, MAX_LISTED).map((m) => getInvoice(kv, chainId, m)));
+  const all = await Promise.all(idx.slice(0, MAX_LISTED).map((m) => getInvoice(kv, chainId, m, claims)));
   return all.filter((x): x is StoredInvoice => x !== null);
 }
 
@@ -109,12 +132,32 @@ export type InvoiceCheck =
   | { status: "open"; invoice: StoredInvoice; inbox: Extract<FindResult, { status: "ok" }> }
   | { status: "unavailable"; invoice: StoredInvoice; message: string };
 
-/** Write the payment into the invoice and claim the transaction for it, so it cannot pay a second invoice. */
-async function recordPaid(kv: KV, chainId: number, invoice: StoredInvoice, p: PaymentRef, now: Date): Promise<StoredInvoice> {
-  const paid: StoredInvoice = { ...invoice, paid: { txHash: p.txHash, block: p.block, from: p.from, amount: p.amount, at: now.toISOString() } };
-  await kv.put(txKey(chainId, p.txHash), invoice.memo, { expirationTtl: INVOICE_TTL_SECONDS });
-  await kv.put(invKey(chainId, invoice.memo), JSON.stringify(paid), { expirationTtl: INVOICE_TTL_SECONDS });
-  return paid;
+type RecordResult = { status: "paid"; invoice: StoredInvoice } | { status: "already_paid" | "tx_used"; invoice: StoredInvoice; owner?: string };
+
+/**
+ * Write the payment into the invoice and claim the transaction for it, so it cannot pay a second
+ * invoice. With a claims store the two writes are one atomic transaction. KV is updated as a cache.
+ */
+async function recordPaid(kv: KV, chainId: number, invoice: StoredInvoice, p: PaymentRef, now: Date, claims?: InvoiceClaims): Promise<RecordResult> {
+  const paid: Paid = { txHash: p.txHash, block: p.block, from: p.from, amount: p.amount, at: now.toISOString() };
+  let result: RecordResult;
+  if (claims) {
+    // A paid invoice that is still only in KV keeps its transaction claimed during the migration.
+    const legacyOwner = await kv.get(txKey(chainId, p.txHash));
+    if (legacyOwner && legacyOwner !== invoice.memo) return { status: "tx_used", invoice, owner: legacyOwner };
+    const claim = await claims.pay(chainId, invoice, paid);
+    if (claim.status === "tx_used") return { status: "tx_used", invoice, owner: claim.owner };
+    result = { status: claim.status, invoice: claim.invoice };
+  } else {
+    const next: StoredInvoice = { ...invoice, paid };
+    result = { status: "paid", invoice: next };
+  }
+  const stored = result.invoice;
+  if (stored.paid) {
+    await kv.put(txKey(chainId, stored.paid.txHash), stored.memo, { expirationTtl: INVOICE_TTL_SECONDS });
+    await kv.put(invKey(chainId, stored.memo), JSON.stringify(stored), { expirationTtl: INVOICE_TTL_SECONDS });
+  }
+  return result;
 }
 
 /**
@@ -123,18 +166,20 @@ async function recordPaid(kv: KV, chainId: number, invoice: StoredInvoice, p: Pa
  * skipped, so it cannot pay two invoices. A matching payment that is not deep enough yet gives
  * "confirming", so a pay page can lock the Pay button before the invoice is recorded.
  */
-export async function checkInvoice(kv: KV, chain: MezoChain, invoice: StoredInvoice, fetchImpl?: Fetch, now: Date = new Date()): Promise<InvoiceCheck> {
+export async function checkInvoice(kv: KV, chain: MezoChain, invoice: StoredInvoice, fetchImpl?: Fetch, now: Date = new Date(), claims?: InvoiceClaims): Promise<InvoiceCheck> {
   if (invoice.paid) return { status: "paid", invoice };
   const inbox = await findPayments(chain, { recipient: invoice.to, fromBlock: invoice.fromBlock, memo: invoice.memo, amount: BigInt(invoice.units) }, fetchImpl);
   if (inbox.status !== "ok") return { status: "unavailable", invoice, message: inbox.message };
   const candidates = [...inbox.payments].reverse().filter((p) => p.matches === true); // oldest first
   for (const p of candidates) {
-    const owner = await kv.get(txKey(chain.id, p.txHash));
+    const owner = claims ? ((await claims.owner(chain.id, p.txHash)) ?? (await kv.get(txKey(chain.id, p.txHash)))) : await kv.get(txKey(chain.id, p.txHash));
     if (owner && owner !== invoice.memo) continue;
     const ref: PaymentRef = { txHash: p.txHash, block: p.block, from: p.from, amount: p.amount };
     const confirmations = inbox.head - p.block + 1;
     if (confirmations < CONFIRMATIONS_REQUIRED) return { status: "confirming", invoice, payment: ref, confirmations, required: CONFIRMATIONS_REQUIRED, inbox };
-    return { status: "paid", invoice: await recordPaid(kv, chain.id, invoice, ref, now) };
+    const recorded = await recordPaid(kv, chain.id, invoice, ref, now, claims);
+    if (recorded.status === "tx_used") continue; // another invoice claimed it between the read and the write
+    return { status: "paid", invoice: recorded.invoice };
   }
   return { status: "open", invoice, inbox };
 }
@@ -151,15 +196,20 @@ export type ConfirmResult =
  * than the search window, or a busy address). The transaction is checked against the stored invoice
  * (recipient, amount, reference, invoice block), never against values from the caller, so anyone may call it.
  */
-export async function confirmInvoice(kv: KV, chain: MezoChain, invoice: StoredInvoice, txHash: string, fetchImpl?: Fetch, now: Date = new Date()): Promise<ConfirmResult> {
+export async function confirmInvoice(kv: KV, chain: MezoChain, invoice: StoredInvoice, txHash: string, fetchImpl?: Fetch, now: Date = new Date(), claims?: InvoiceClaims): Promise<ConfirmResult> {
   if (invoice.paid?.txHash.toLowerCase() === txHash.toLowerCase()) return { status: "paid", invoice };
   const v = await verifyPayment(chain, { txHash, recipient: invoice.to, amount: BigInt(invoice.units), memo: invoice.memo, fromBlock: invoice.fromBlock }, fetchImpl);
   if (v.status !== "paid") return { status: v.status, invoice, message: v.message };
   // Only a transaction that really pays this invoice is called a second payment.
   if (invoice.paid) return { status: "already_paid", invoice, message: `Invoice ${invoice.memo} was already paid by ${invoice.paid.txHash}. This transaction is a second payment and does not count for it.` };
   const ref: PaymentRef = { txHash: txHash.toLowerCase(), block: v.block, from: v.from ?? "", amount: v.paid };
-  if (v.confirmations < CONFIRMATIONS_REQUIRED) return { status: "confirming", invoice, payment: ref, confirmations: v.confirmations, required: CONFIRMATIONS_REQUIRED };
-  const owner = await kv.get(txKey(chain.id, txHash));
+  // The owner check comes before the depth check, so a shallow transaction that already paid another
+  // invoice is reported as tx_used on this invoice, not as confirming.
+  const owner = claims ? ((await claims.owner(chain.id, txHash)) ?? (await kv.get(txKey(chain.id, txHash)))) : await kv.get(txKey(chain.id, txHash));
   if (owner && owner !== invoice.memo) return { status: "tx_used", invoice, message: `This transaction already paid invoice ${owner}. One transaction pays one invoice.` };
-  return { status: "paid", invoice: await recordPaid(kv, chain.id, invoice, ref, now) };
+  if (v.confirmations < CONFIRMATIONS_REQUIRED) return { status: "confirming", invoice, payment: ref, confirmations: v.confirmations, required: CONFIRMATIONS_REQUIRED };
+  const recorded = await recordPaid(kv, chain.id, invoice, ref, now, claims);
+  if (recorded.status === "tx_used") return { status: "tx_used", invoice, message: `This transaction already paid invoice ${recorded.owner ?? "another invoice"}. One transaction pays one invoice.` };
+  if (recorded.status === "already_paid") return { status: "already_paid", invoice: recorded.invoice, message: `Invoice ${invoice.memo} was already paid by another transaction. This transaction is a second payment and does not count for it.` };
+  return { status: "paid", invoice: recorded.invoice };
 }
