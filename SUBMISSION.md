@@ -1,6 +1,6 @@
 # MUSD Pay Links, AKINDO submission
 
-Answers for the Mezo Buildathon submission form. Updated on 25 October 2026, inside the Wave 1 build period (16 to 26 October 2026).
+Answers for the Mezo Buildathon submission form. Updated on 26 October 2026, inside the Wave 1 build period (16 to 26 October 2026).
 
 ## Project name
 
@@ -54,7 +54,16 @@ Entirely new, built during the hackathon. It reuses design ideas from PayLink Gu
 
 ## Project readiness
 
-Testnet deployment. A live web app and JSON API on Cloudflare Workers read the MUSD token and the MUSD protocol on Mezo Testnet and Mainnet. No payment of our own has been made yet. Testnet MUSD is minted against testnet BTC, and the testnet BTC faucet needs a human check. The scripts that open a trove and pay a link are ready. The `openTrove` call was checked with a simulation that did not revert.
+Testnet deployment with a real payment. A live web app and JSON API on Cloudflare Workers read the MUSD token and the MUSD protocol on Mezo Testnet and Mainnet.
+
+On 26 October 2026 the project made its own payment on Mezo Testnet, end to end. Testnet only, no real money.
+
+1. Borrow. The project's test address opened a trove. It locked 0.049 test BTC and minted 1,800 MUSD. The debt is 2,001.80 MUSD and the ratio is 196 percent. Transaction https://explorer.test.mezo.org/tx/0x1de64d3a9fe0588d2707718ed3c247d793f5d5f818efd502ae80ee8dc70a26f2
+2. Invoice. The live Worker created invoice INV-65ZVUMXW for 5 MUSD to a merchant test address.
+3. Pay. The script checked the link with the guard and sent 5 MUSD with the reference. Transaction https://explorer.test.mezo.org/tx/0x7abfedb120383f817134e5e63823aef69948930fa9760c6b96fb03a87909cc0b
+4. Confirm. The invoice check found the payment by its reference, with no hash from the payer. The merchant inbox and the verify route also return paid.
+
+The payment was sent from a script. A browser wallet has not paid a link yet.
 
 ## Links
 
@@ -65,16 +74,18 @@ Testnet deployment. A live web app and JSON API on Cloudflare Workers read the M
 | Pitch deck | https://github.com/theluckystrike/musd-pay-links/blob/main/docs/pitch-deck.pdf |
 | Pitch video | https://youtu.be/T4JLpYwOAoY |
 | Threat model and test output | https://github.com/theluckystrike/musd-pay-links#threat-model |
+| Own borrow transaction (testnet) | https://explorer.test.mezo.org/tx/0x1de64d3a9fe0588d2707718ed3c247d793f5d5f818efd502ae80ee8dc70a26f2 |
+| Own invoice payment (testnet) | https://explorer.test.mezo.org/tx/0x7abfedb120383f817134e5e63823aef69948930fa9760c6b96fb03a87909cc0b |
 | Testnet MUSD contract | https://explorer.test.mezo.org/token/0x118917a40FAF1CD7a13dB0Ef56C86De7973Ac503 |
 | Mainnet MUSD contract | https://explorer.mezo.org/token/0xdD468A1DDc392dcdbEf6db6e34E89AA338F9F186 |
 
 ## Evidence
 
-261 tests pass, 255 offline and 6 that read Mezo over RPC. They cover the guard's attack cases, the borrow quote rules, invoices, batched log search, replay by block, the RPC fallback, CORS, the rate limit and the HTTP codes. Contract reads and `eth_call` dry runs are in `docs/evidence.json` in the repository.
+262 tests pass, 255 offline and 7 that read Mezo over RPC. One of them verifies the project's own payment on chain. They cover the guard's attack cases, the borrow quote rules, invoices, batched log search, replay by block, the RPC fallback, CORS, the rate limit and the HTTP codes. Contract reads, `eth_call` dry runs and the project's own borrow and payment are in `docs/evidence.json` in the repository.
 
 ## What is next
 
-1. By 15 November 2026 (Wave 2), make the first MUSD payment on Mezo Testnet end to end and record it, publish the guard as an npm package, and add a Telegram bot that creates links and reports payments.
+1. By 15 November 2026 (Wave 2), pay a link from a browser wallet on Mezo Testnet and record it, publish the guard as an npm package, and add a Telegram bot that creates links and reports payments.
 2. By the end of December 2026, add Mezo Passport so Bitcoin wallets can pay links, and open the trove from the pay page when the payer is short.
 3. By the end of January 2027, add merchant notifications, so a small shop can take MUSD with links and see each payment confirmed without running a node.
 

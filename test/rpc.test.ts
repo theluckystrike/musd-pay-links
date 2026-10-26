@@ -449,6 +449,12 @@ describe.runIf(process.env.LIVE === "1")("live Mezo RPC (LIVE=1)", () => {
       }
     }
   }, 30000);
+  it("verifies the project's own 5 MUSD payment of invoice INV-65ZVUMXW (26 Oct 2026)", async () => {
+    const own = { txHash: "0x7abfedb120383f817134e5e63823aef69948930fa9760c6b96fb03a87909cc0b", recipient: "0x94958151D1789C8279a67f5cE4631e9DDdE43cB6", amount: 5n * 10n ** 18n };
+    expect(await verifyPayment(MEZO_TESTNET, { ...own, memo: "INV-65ZVUMXW", fromBlock: 16370824 })).toMatchObject({ status: "paid", paid: "5", memoMatched: true, block: 16370829 });
+    expect((await verifyPayment(MEZO_TESTNET, { ...own, memo: "INV-0001" })).status).toBe("mismatch");
+    expect((await verifyPayment(MEZO_TESTNET, { ...own, memo: "INV-65ZVUMXW", fromBlock: 16370830 })).status).toBe("mismatch");
+  }, 60000);
   it("finds recent MUSD transfers to an active testnet address", async () => {
     const r = await findPayments(MEZO_TESTNET, { recipient: "0x64237b334f24b5d54B2A83ae0f8A9B74E29Cd564" });
     expect(r.status).toBe("ok");

@@ -1,13 +1,13 @@
 {
-  "at": "2026-10-25T15:02:50.721Z",
+  "at": "2026-10-26T00:48:48.885Z",
   "testnetToken": {
     "chainId": 31611,
     "address": "0x118917a40FAF1CD7a13dB0Ef56C86De7973Ac503",
     "name": "Mezo USD",
     "symbol": "MUSD",
     "decimals": 18,
-    "totalSupply": "523893019.239097900397485064",
-    "block": 16362420
+    "totalSupply": "523910734.895266074065657838",
+    "block": 16370869
   },
   "mainnetToken": {
     "chainId": 31612,
@@ -16,7 +16,7 @@
     "symbol": "MUSD",
     "decimals": 18,
     "totalSupply": "29482016.986182972908040124",
-    "block": 12757205
+    "block": 12766972
   },
   "holderBalance": "38210825700027446161068038",
   "simulations": {
@@ -34,7 +34,7 @@
   "verifyReal": {
     "status": "paid",
     "paid": "6",
-    "confirmations": 1700,
+    "confirmations": 10149,
     "memoMatched": null,
     "block": 16360722
   },
@@ -57,16 +57,16 @@
   "borrowTestnet": {
     "terms": {
       "chainId": 31611,
-      "price": "80677353570000000000000",
+      "price": "79856795300000000000000",
       "mcr": "1100000000000000000",
       "ccr": "1500000000000000000",
       "minNetDebt": "1800000000000000000000",
       "gasCompensation": "200000000000000000000",
       "borrowingRate": "1000000000000000",
       "interestRateBps": 100,
-      "tcr": "2898056527274738789",
+      "tcr": "2868509897924196077",
       "recoveryMode": false,
-      "troves": 330
+      "troves": 335
     },
     "quoteFor25": {
       "need": "25000000000000000000",
@@ -75,9 +75,9 @@
       "gasCompensation": "200000000000000000000",
       "totalDebt": "2001800000000000000000",
       "ratio": "2000000000000000000",
-      "collateral": "49624830548342936",
-      "minCollateral": "27293656801588615",
-      "liquidationPrice": "44372544463499999719774",
+      "collateral": "50134744137422204",
+      "minCollateral": "27574109275582213",
+      "liquidationPrice": "43921237414999999840897",
       "yearlyInterest": "18018000000000000000",
       "notes": [
         "The protocol minimum is 1800 MUSD, so the trove mints 1775 MUSD more than the link asks for. You keep the rest.",
@@ -88,14 +88,14 @@
   "borrowMainnet": {
     "terms": {
       "chainId": 31612,
-      "price": "80680283650000000000000",
+      "price": "79897913220000000000000",
       "mcr": "1100000000000000000",
       "ccr": "1500000000000000000",
       "minNetDebt": "1800000000000000000000",
       "gasCompensation": "200000000000000000000",
       "borrowingRate": "1000000000000000",
       "interestRateBps": 100,
-      "tcr": "92373574165665871618",
+      "tcr": "91476793034685976609",
       "recoveryMode": false,
       "troves": 1
     },
@@ -106,9 +106,9 @@
       "gasCompensation": "200000000000000000000",
       "totalDebt": "2001800000000000000000",
       "ratio": "2000000000000000000",
-      "collateral": "49623028314675491",
-      "minCollateral": "27292665573071520",
-      "liquidationPrice": "44374156007499999206605",
+      "collateral": "50108943258330571",
+      "minCollateral": "27559918792081815",
+      "liquidationPrice": "43943852270999999957950",
       "yearlyInterest": "18018000000000000000",
       "notes": [
         "The protocol minimum is 1800 MUSD, so the trove mints 1775 MUSD more than the link asks for. You keep the rest.",
@@ -118,16 +118,44 @@
   },
   "openTroveSimulation": {
     "borrow": "1800000000000000000000",
-    "collateral": "49629720128118451",
+    "collateral": "50115261383469764",
     "to": "0xCdF7028ceAB81fA0C6971208e83fa7872994beE5",
     "result": "ok 0x"
   },
   "inbox": {
     "status": "ok",
-    "fromBlock": 16342426,
-    "head": 16362426,
+    "fromBlock": 16350875,
+    "head": 16370875,
     "payments": 17,
     "withReference": 0,
-    "newest": "0x14e9d6337af2f99c7c0ac1930edc6cbcd1b5cb9e0dcc4fa19f5ffe07c8939e0a"
+    "newest": "0x28fae1e25dd4b7031eebc4921c000b2309a2633ec0e9b0773db13c725a277b8f"
+  },
+  "ownPayment": {
+    "borrowTx": "0x1de64d3a9fe0588d2707718ed3c247d793f5d5f818efd502ae80ee8dc70a26f2",
+    "borrowStatus": "0x1",
+    "borrowBlock": 16370809,
+    "trove": {
+      "owner": "0x980E2213E6396043e2d104Ad65cBF162985Ce313",
+      "status": "1",
+      "collateral": "49000000000000000",
+      "debt": "2001800175713611377930"
+    },
+    "payTx": "0x7abfedb120383f817134e5e63823aef69948930fa9760c6b96fb03a87909cc0b",
+    "verify": {
+      "status": "paid",
+      "paid": "5",
+      "confirmations": 49,
+      "memoMatched": true,
+      "block": 16370829
+    },
+    "verifyWrongReference": {
+      "status": "mismatch",
+      "message": "This payment does not carry the reference INV-0001 in its input data, so it cannot mark this invoice paid."
+    },
+    "inbox": {
+      "status": "ok",
+      "paid": "0x7abfedb120383f817134e5e63823aef69948930fa9760c6b96fb03a87909cc0b",
+      "payments": 1
+    }
   }
 }

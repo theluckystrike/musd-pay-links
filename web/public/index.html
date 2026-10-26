@@ -152,16 +152,16 @@ footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
 
     <section class="panel wide" aria-labelledby="v-h">
       <h2 id="v-h">3. Merchant, confirm the payment on chain</h2>
-      <p class="sub">Reads the transaction receipt and counts MUSD Transfer events from the real MUSD contract to the address you enter. With a reference, the payment must carry it. With an invoice block, a payment mined earlier is refused. Prefilled with a public 6 MUSD wallet to wallet transfer on Mezo Testnet made by someone else on 25 October 2026. It has no reference, so leave that field empty for it. Creating an invoice in panel 1 fills this form with that invoice.</p>
+      <p class="sub">Reads the transaction receipt and counts MUSD Transfer events from the real MUSD contract to the address you enter. With a reference, the payment must carry it. With an invoice block, a payment mined earlier is refused. Prefilled with the project's own 5 MUSD payment of invoice INV-65ZVUMXW on Mezo Testnet, made on 26 October 2026. Creating an invoice in panel 1 fills this form with that invoice.</p>
       <div class="row">
-        <div style="flex:3 1 320px"><label for="v-tx">Transaction hash</label><input id="v-tx" spellcheck="false" value="0xc19b443ddcb35fdbe4389382dfff3815a82a0f2e12f43b00537d73db89be239a"></div>
+        <div style="flex:3 1 320px"><label for="v-tx">Transaction hash</label><input id="v-tx" spellcheck="false" value="0x7abfedb120383f817134e5e63823aef69948930fa9760c6b96fb03a87909cc0b"></div>
         <div><label for="v-chain">Network</label><select id="v-chain"><option value="31611">Mezo Testnet</option><option value="31612">Mezo Mainnet</option></select></div>
       </div>
       <div class="row">
-        <div style="flex:3 1 320px"><label for="v-to">Recipient</label><input id="v-to" spellcheck="false" value="0x67A792C5025193C9cBDA498FE462Cbdf49C8a598"></div>
-        <div><label for="v-amount">Expected MUSD</label><input id="v-amount" value="6"></div>
-        <div><label for="v-memo">Reference</label><input id="v-memo" value=""></div>
-        <div><label for="v-from">Invoice block</label><input id="v-from" inputmode="numeric" value="16360000"></div>
+        <div style="flex:3 1 320px"><label for="v-to">Recipient</label><input id="v-to" spellcheck="false" value="0x94958151D1789C8279a67f5cE4631e9DDdE43cB6"></div>
+        <div><label for="v-amount">Expected MUSD</label><input id="v-amount" value="5"></div>
+        <div><label for="v-memo">Reference</label><input id="v-memo" value="INV-65ZVUMXW"></div>
+        <div><label for="v-from">Invoice block</label><input id="v-from" inputmode="numeric" value="16370824"></div>
       </div>
       <div class="actions"><button id="v-go">Verify payment</button></div>
       <div class="out" id="v-out" aria-live="polite"></div>

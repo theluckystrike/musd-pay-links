@@ -10,6 +10,19 @@ Pitch deck, 10 slides, in [docs/pitch-deck.pdf](docs/pitch-deck.pdf). The slides
 
 At phone width (390 px) the page has no horizontal scroll, see [docs/demo-mobile.png](docs/demo-mobile.png).
 
+## First own payment on Mezo Testnet, 26 October 2026
+
+The project made its own borrow and its own invoice payment on Mezo Testnet. Testnet only, no real money.
+
+| Step | Transaction | Result |
+|---|---|---|
+| Borrow. `pnpm testnet-borrow` opens a trove | [`0x1de64d3a...26f2`](https://explorer.test.mezo.org/tx/0x1de64d3a9fe0588d2707718ed3c247d793f5d5f818efd502ae80ee8dc70a26f2) | 0.049 test BTC locked, 1,800 MUSD minted, block 16370809 |
+| Invoice. The live Worker creates `INV-65ZVUMXW` for 5 MUSD | no transaction | invoice block 16370824 |
+| Pay. `pnpm testnet-pay` checks the link with the guard and sends it | [`0x7abfedb1...cc0b`](https://explorer.test.mezo.org/tx/0x7abfedb120383f817134e5e63823aef69948930fa9760c6b96fb03a87909cc0b) | 5 MUSD to the merchant, reference in the transfer data, block 16370829 |
+| Confirm. Live invoice check, merchant inbox and `/api/verify` | no transaction | all three return `paid`, 5 MUSD, reference matched |
+
+Details are in [Testnet payment](#testnet-payment).
+
 ## What changed on 25 October 2026
 
 - Borrow quote from the live MUSD protocol. A payer who is short of MUSD sees the BTC to lock, the fee, the protocol minimum and the liquidation price, read from four MUSD protocol contracts, with a link to the borrow page of the Mezo app.
@@ -21,7 +34,7 @@ At phone width (390 px) the page has no horizontal scroll, see [docs/demo-mobile
 - Chain routes send no CORS header and have an exact per-client limit in a Durable Object. HTTP codes follow the answer.
 - The payer picks the networks they accept. The demo defaults to Mezo Testnet only.
 - A scripted path from test BTC to a paid invoice (`testnet-borrow` and `testnet-pay`).
-- Tests went from 204 to 261.
+- Tests went from 204 to 261. On 26 October one live test was added for the project's own payment (262).
 
 ## What it does
 
@@ -151,13 +164,19 @@ The attacker controls the link text. They may also control the page or message t
 
 Out of scope. The guard does not judge whether the merchant is honest, and it does not replace the wallet's own confirmation screen. It does not check sanctions lists. A payer who sets a high limit and no allowlist can still pay a real but unwanted address. The verifier trusts the RPC node it reads from (the Worker uses the public Mezo RPC endpoints listed above).
 
-## Testnet payment status
+## Testnet payment
 
-No payment of our own has been made yet, and none is shown as if it were. Testnet MUSD is minted by opening a trove against testnet BTC, and the testnet BTC faucet at https://faucet.test.mezo.org shows a Cloudflare "Verify you are human" check. An agent does not pass that check, so one click by a person is needed.
+On 26 October 2026 the project made its own payment on Mezo Testnet, end to end. Testnet only, no real money. The key of the payer stays outside the repo and was never printed.
 
-Everything after that click is scripted. `scripts/testnet-borrow.ts` reads the live borrow terms, simulates `openTrove` with `eth_call` and then sends it, and `scripts/testnet-pay.ts` pays a link through the guard and verifies it. The `openTrove` call path was checked on 25 October 2026 with a dry run (`pnpm testnet-borrow --dry-run`), which simulates the call with a state override that gives the address 1 test BTC. The simulation of `openTrove(1800 MUSD)` with 0.0499 BTC returned without a revert. Nothing was sent.
+1. Faucet. At 00:42 UTC the throwaway payer address [`0x980E...e313`](https://explorer.test.mezo.org/address/0x980E2213E6396043e2d104Ad65cBF162985Ce313) got 0.05 test BTC from https://faucet.test.mezo.org. The faucet needs a human check, so a person did this step.
+2. Borrow. `pnpm testnet-borrow` read the live terms. The BTC price from PriceFeed was 80,068.61 USD. MCR was 110 percent and CCR was 150 percent. The minimum debt was 1,800 MUSD plus 200 MUSD gas compensation. The script simulated `openTrove`, then sent it with 0.049 test BTC and kept 0.001 test BTC for gas. Transaction [`0x1de64d3a9fe0588d2707718ed3c247d793f5d5f818efd502ae80ee8dc70a26f2`](https://explorer.test.mezo.org/tx/0x1de64d3a9fe0588d2707718ed3c247d793f5d5f818efd502ae80ee8dc70a26f2) in block 16370809. The trove is active. It holds 0.049 BTC against 2,001.80 MUSD of debt, a ratio of 196 percent. The liquidation price at MCR is about 44,940 USD.
+3. Invoice. A `POST /api/invoices` on the live Worker created invoice `INV-65ZVUMXW` for 5 MUSD to the merchant test address [`0x9495...3cB6`](https://explorer.test.mezo.org/address/0x94958151D1789C8279a67f5cE4631e9DDdE43cB6). The Worker stamped it with block 16370824.
+4. Pay. `pnpm testnet-pay "<link>" 5` checked the invoice link with the guard and sent the MUSD `transfer` with the reference bytes after the arguments. Transaction [`0x7abfedb120383f817134e5e63823aef69948930fa9760c6b96fb03a87909cc0b`](https://explorer.test.mezo.org/tx/0x7abfedb120383f817134e5e63823aef69948930fa9760c6b96fb03a87909cc0b) in block 16370829.
+5. Confirm. Without a transaction hash, `GET /api/invoices/INV-65ZVUMXW` found the payment by its reference and returned `paid`. `GET /api/payments` (the merchant inbox) listed it as the matching payment. `GET /api/verify` returned `paid`, 5 MUSD, reference matched. The same payment checked against the reference `INV-0001` returns `mismatch`.
 
-The verify panel is prefilled with a public 6 MUSD wallet to wallet `transfer` on Mezo Testnet that someone else made on 25 October 2026 ([`0xc19b443d...e239a`](https://explorer.test.mezo.org/tx/0xc19b443ddcb35fdbe4389382dfff3815a82a0f2e12f43b00537d73db89be239a)). It carries no reference.
+The verify panel on the demo page is prefilled with this payment. The raw output is in `ownPayment` in [docs/evidence.json](docs/evidence.json).
+
+What this does not show. The payment was sent from a script, not from a browser wallet. The payer and the merchant are both test addresses of the project.
 
 What is verified against the real contracts, with no key.
 
@@ -167,13 +186,15 @@ What is verified against the real contracts, with no key.
 | `eth_call` dry run of the guard's transfer data from a public testnet MUSD holder, with and without memo | returns `true` |
 | Borrow terms read from BorrowerOperations, TroveManager, PriceFeed and InterestRateManager on both chains | sane values, see above |
 | `openTrove` simulation for the smallest trove | no revert |
-| `verifyPayment` on the public transfer above | `paid`, 6 MUSD |
+| `verifyPayment` on the project's own payment, with reference and invoice block | `paid`, 5 MUSD |
+| Trove of the payer address in TroveManager | status 1 (active), 0.049 BTC, 2,001.80 MUSD debt |
+| `verifyPayment` on a public 6 MUSD transfer made by someone else ([`0xc19b443d...e239a`](https://explorer.test.mezo.org/tx/0xc19b443ddcb35fdbe4389382dfff3815a82a0f2e12f43b00537d73db89be239a)) | `paid`, 6 MUSD |
 | `findPayments` on an active testnet address | lists its MUSD payments with references decoded |
 | `verifyPayment` with an invoice block after the transfer | `mismatch` |
 
-The raw output of every check above is in [docs/evidence.json](docs/evidence.json), regenerated on 25 October 2026. Run `pnpm evidence` to read it again.
+The raw output of every check above is in [docs/evidence.json](docs/evidence.json), regenerated on 26 October 2026. Run `pnpm evidence` to read it again.
 
-The demo page has a payment path that has not been used with a real wallet yet. A payer opens the page with a wallet that holds testnet MUSD, checks a link and presses "Pay with browser wallet". The page switches the wallet to Mezo Testnet, reads the MUSD balance, shows the borrow quote when the balance is short, asks the wallet to sign the checked transaction, and confirms the receipt with the verifier.
+The demo page has a browser wallet payment path that has not been used with a real wallet yet. A payer opens the page with a wallet that holds testnet MUSD, checks a link and presses "Pay with browser wallet". The page switches the wallet to Mezo Testnet, reads the MUSD balance, shows the borrow quote when the balance is short, asks the wallet to sign the checked transaction, and confirms the receipt with the verifier.
 
 ## Setup
 
@@ -199,7 +220,7 @@ MEZO_KEY_FILE=/path/to/key pnpm testnet-pay "ethereum..." 5
 
 ## Test output
 
-Run on 25 October 2026 with `LIVE=1 pnpm test`.
+Run on 26 October 2026 with `LIVE=1 pnpm test`.
 
 ```text
  ✓ test/address.test.ts   20 tests
@@ -208,13 +229,13 @@ Run on 25 October 2026 with `LIVE=1 pnpm test`.
  ✓ test/guard.test.ts     93 tests
  ✓ test/invoices.test.ts  13 tests
  ✓ test/merchant.test.ts  15 tests
- ✓ test/rpc.test.ts       39 tests (4 live)
+ ✓ test/rpc.test.ts       40 tests (5 live)
  ✓ test/worker.test.ts    16 tests
  Test Files  8 passed (8)
-      Tests  261 passed (261)
+      Tests  262 passed (262)
 ```
 
-Without network, `pnpm test` gives 255 passed and 6 skipped.
+Without network, `pnpm test` gives 255 passed and 7 skipped. One live test verifies the project's own payment on chain.
 
 The guard suite covers wrong chains, lookalike tokens, uint256 overflow and wraparound, bad checksums, eleven unicode tricks, percent-encoding, extra and duplicated parameters, dangerous functions, and 2,000 random inputs that must never throw. The merchant suite creates 300 links with pseudo-random amounts and checks that each one passes the guard with the same amount. The verifier suite uses fake RPCs that answer null, fail, or lag on the first endpoint, and checks that a payment without the reference or from before the invoice block is refused. The inbox suite checks chunked log queries (at most 5,000 blocks a range, at most 20,000 blocks back), batching (60 payments in at most 3 requests), the oldest-payment rule, possible matches, lagging nodes, reference decoding, sums inside one transaction and the amount rule. The borrow suite checks the minimum debt, the fee, rounding up of the BTC, the liquidation price, and the MCR and recovery mode floors. The invoice suite checks unique references, the block stamp, the oldest-payment rule, one transaction for one invoice and possible matches. The worker suite checks CORS, both limiters and the HTTP codes. `pnpm typecheck` passes and `pnpm audit --prod` reports no known vulnerabilities.
 
