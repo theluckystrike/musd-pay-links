@@ -152,12 +152,11 @@ export type ConfirmResult =
  * (recipient, amount, reference, invoice block), never against values from the caller, so anyone may call it.
  */
 export async function confirmInvoice(kv: KV, chain: MezoChain, invoice: StoredInvoice, txHash: string, fetchImpl?: Fetch, now: Date = new Date()): Promise<ConfirmResult> {
-  if (invoice.paid) {
-    if (invoice.paid.txHash.toLowerCase() === txHash.toLowerCase()) return { status: "paid", invoice };
-    return { status: "already_paid", invoice, message: `Invoice ${invoice.memo} was already paid by ${invoice.paid.txHash}. This transaction is a second payment and does not count for it.` };
-  }
+  if (invoice.paid?.txHash.toLowerCase() === txHash.toLowerCase()) return { status: "paid", invoice };
   const v = await verifyPayment(chain, { txHash, recipient: invoice.to, amount: BigInt(invoice.units), memo: invoice.memo, fromBlock: invoice.fromBlock }, fetchImpl);
   if (v.status !== "paid") return { status: v.status, invoice, message: v.message };
+  // Only a transaction that really pays this invoice is called a second payment.
+  if (invoice.paid) return { status: "already_paid", invoice, message: `Invoice ${invoice.memo} was already paid by ${invoice.paid.txHash}. This transaction is a second payment and does not count for it.` };
   const ref: PaymentRef = { txHash: txHash.toLowerCase(), block: v.block, from: v.from ?? "", amount: v.paid };
   if (v.confirmations < CONFIRMATIONS_REQUIRED) return { status: "confirming", invoice, payment: ref, confirmations: v.confirmations, required: CONFIRMATIONS_REQUIRED };
   const owner = await kv.get(txKey(chain.id, txHash));

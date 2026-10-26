@@ -220,6 +220,9 @@ describe("double payment", () => {
     const again = await confirmInvoice(kv, MEZO_TESTNET, (await getInvoice(kv, MEZO_TESTNET.id, "INV-2X"))!, h(22), f);
     expect(again).toMatchObject({ status: "already_paid", invoice: { paid: { txHash: h(21) } } });
     expect(statusCode(again.status)).toBe(409);
+    // A transaction that does not pay this invoice is not called a second payment.
+    const other = await confirmInvoice(kv, MEZO_TESTNET, (await getInvoice(kv, MEZO_TESTNET.id, "INV-2X"))!, h(99), f);
+    expect(other.status).toBe("not_found");
   });
 
   it("locks Pay while the first payment is still shallow", async () => {
