@@ -20,7 +20,7 @@ Testnet only. No real money. Each row was checked on chain or on the live Worker
 | Same payment with a wrong reference or a later invoice block | live `/api/verify` | `mismatch` |
 | MUSD contracts on testnet and mainnet | `name()`, `symbol()`, `decimals()` | "Mezo USD", "MUSD", 18 |
 | Borrow quote from the live MUSD protocol | PriceFeed, TroveManager, BorrowerOperations, InterestRateManager | price, MCR, CCR, fee, minimum debt |
-| Tests | `LIVE=1 pnpm test` on 26 October 2026 | 293 of 293 passed |
+| Tests | `LIVE=1 pnpm test` on 26 October 2026 | 295 of 295 passed |
 
 The payer and the merchant are both test addresses of the project. The payment came from a script. No browser wallet has paid a link yet.
 
@@ -34,7 +34,8 @@ The payer and the merchant are both test addresses of the project. The payment c
 
 ## How it protects the money
 
-- The pay page checks the chain when it opens and again right before it sends. Pay stays locked when a matching payment exists, when the search cannot cover every block since the invoice, or when the check fails.
+- The pay page checks the chain when it opens and again right before the wallet window opens. Pay stays locked when a matching payment exists, when the search cannot cover every block since the invoice, or when the check fails. A second click while the wallet is open does nothing. The page remembers a hash it sent, so a reload or a second tab does not pay again.
+- A smaller payment with the reference, or a payment of the exact amount without it, also locks Pay. The payer must say it is not theirs first.
 - An invoice is recorded as paid only at 5 confirmations (`CONFIRMATIONS_REQUIRED`). Before that, the answer is `confirming` with the depth.
 - `POST /api/invoices/:memo/confirm` with `{"tx":"0x..."}` records a payment by hash. It checks the stored invoice, not the caller. Use it for invoices older than the search window of about 23 hours.
 - One transaction pays one invoice. A payment mined before the invoice block does not count. The reference must match exactly.
@@ -74,7 +75,7 @@ The amount is in base units (12.5 MUSD here). The `memo` is up to 32 characters.
 | `GET /api/payments?chain=31611&to=0x...` | Merchant inbox. `matches` and `possible` are `null` when not evaluated |
 | `GET /api/borrow?chain=31611&need=25` | Borrow quote from the live MUSD protocol |
 
-HTTP codes follow the answer. 200 for `paid`, `confirming`, `open` and `pending`. 401 for a bad signature. 404 for `not_found`. 409 for a used reference or transaction. 422 for `mismatch`. 503 when the network does not answer. Errors never contain internal detail.
+HTTP codes follow the answer. 200 for `paid`, `confirming`, `open` and `pending`. 401 for a bad signature. 404 for `not_found`. 409 for a used reference or transaction, and for a second payment of a paid invoice (`already_paid`). 422 for `mismatch`. 503 when the network does not answer. Errors never contain internal detail.
 
 Chain routes send no CORS header. They allow 30 calls a minute per client. Writes allow 10 a minute. A Durable Object keeps the exact count.
 
@@ -104,6 +105,8 @@ MEZO_KEY_FILE=/path/to/key pnpm create-invoice 5          # signed invoice for t
 - References are unique per chain, first come first served. A random reference is the default.
 - Signed create works with plain wallets (EOA). Smart-contract wallets (EIP-1271) are not supported yet.
 - Invoices made before 26 October 2026 have no signature. They stay readable and show `signed: false`.
+- After about 23 hours an open invoice cannot prove on its page that it is unpaid, so its Pay button stays locked. The merchant makes a new invoice or records a payment by hash.
+- A payment without the reference cannot be recorded by hash. The page shows it as a possible match for a person to check.
 - The app uses MUSD only. It does not use the MEZO token yet.
 - The verifier trusts the public Mezo RPC endpoints.
 

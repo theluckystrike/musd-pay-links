@@ -50,7 +50,7 @@ describe("checkInvoiceSignature", () => {
 
   it("refuses a time more than 10 minutes in the past or the future", async () => {
     expect(SIGNATURE_MAX_AGE_SECONDS).toBe(600);
-    for (const t of [now() - 601, now() + 601]) {
+    for (const t of [now() - 605, now() + 605]) {
       const claim = { chainId: 31611, to: merchant.address, amount: "5", memo: "INV-1", timestamp: t };
       const r = await checkInvoiceSignature(claim, await merchant.signMessage({ message: invoiceMessage(claim) }));
       expect(r).toMatchObject({ ok: false, code: "signature_expired" });

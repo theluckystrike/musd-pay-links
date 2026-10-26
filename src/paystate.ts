@@ -1,6 +1,6 @@
 // Pay page decision: may the payer press Pay for this invoice? Shared by the web client and the tests.
 
-export type PayLock = "not_found" | "paid" | "confirming" | "cannot_prove" | "unavailable" | null;
+export type PayLock = "not_found" | "paid" | "confirming" | "cannot_prove" | "partial" | "possible" | "unavailable" | null;
 
 /** The part of a GET /api/invoices/:memo answer that the decision reads. */
 export interface InvoiceStateAnswer {
@@ -12,6 +12,10 @@ export interface InvoiceStateAnswer {
   checked?: boolean;
   clamped?: boolean;
   truncated?: boolean;
+  /** Payments of exactly the amount that carry no reference. One may be the payer's own, from a wallet that dropped it. */
+  possible?: unknown[];
+  /** Payments with the reference but less than the amount. */
+  partial?: unknown[];
 }
 
 /**
@@ -25,5 +29,8 @@ export function payPageLock(a: InvoiceStateAnswer): PayLock {
   if (a.status === "confirming") return "confirming";
   if (a.status !== "open" || a.checked !== true) return "unavailable";
   if (a.clamped || a.truncated) return "cannot_prove";
+  // The payer must say that none of them is theirs before Pay unlocks.
+  if (a.partial && a.partial.length > 0) return "partial";
+  if (a.possible && a.possible.length > 0) return "possible";
   return null;
 }

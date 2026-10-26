@@ -140,7 +140,9 @@ export async function checkInvoice(kv: KV, chain: MezoChain, invoice: StoredInvo
 }
 
 export type ConfirmResult =
-  | { status: "paid"; invoice: StoredInvoice; sameTx: boolean }
+  | { status: "paid"; invoice: StoredInvoice }
+  /** The invoice was paid by another transaction. A second payment is not hidden behind a "paid". */
+  | { status: "already_paid"; invoice: StoredInvoice; message: string }
   | { status: "confirming"; invoice: StoredInvoice; payment: PaymentRef; confirmations: number; required: number }
   | { status: "tx_used" | "pending" | "not_found" | "failed" | "mismatch" | "unavailable"; invoice: StoredInvoice; message: string };
 
@@ -150,12 +152,15 @@ export type ConfirmResult =
  * (recipient, amount, reference, invoice block), never against values from the caller, so anyone may call it.
  */
 export async function confirmInvoice(kv: KV, chain: MezoChain, invoice: StoredInvoice, txHash: string, fetchImpl?: Fetch, now: Date = new Date()): Promise<ConfirmResult> {
-  if (invoice.paid) return { status: "paid", invoice, sameTx: invoice.paid.txHash.toLowerCase() === txHash.toLowerCase() };
+  if (invoice.paid) {
+    if (invoice.paid.txHash.toLowerCase() === txHash.toLowerCase()) return { status: "paid", invoice };
+    return { status: "already_paid", invoice, message: `Invoice ${invoice.memo} was already paid by ${invoice.paid.txHash}. This transaction is a second payment and does not count for it.` };
+  }
   const v = await verifyPayment(chain, { txHash, recipient: invoice.to, amount: BigInt(invoice.units), memo: invoice.memo, fromBlock: invoice.fromBlock }, fetchImpl);
   if (v.status !== "paid") return { status: v.status, invoice, message: v.message };
   const ref: PaymentRef = { txHash: txHash.toLowerCase(), block: v.block, from: v.from ?? "", amount: v.paid };
   if (v.confirmations < CONFIRMATIONS_REQUIRED) return { status: "confirming", invoice, payment: ref, confirmations: v.confirmations, required: CONFIRMATIONS_REQUIRED };
   const owner = await kv.get(txKey(chain.id, txHash));
   if (owner && owner !== invoice.memo) return { status: "tx_used", invoice, message: `This transaction already paid invoice ${owner}. One transaction pays one invoice.` };
-  return { status: "paid", invoice: await recordPaid(kv, chain.id, invoice, ref, now), sameTx: true };
+  return { status: "paid", invoice: await recordPaid(kv, chain.id, invoice, ref, now) };
 }

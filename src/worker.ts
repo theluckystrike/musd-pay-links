@@ -103,6 +103,7 @@ export function statusCode(status: string): number {
     case "not_found":
       return 404;
     case "tx_used":
+    case "already_paid":
       return 409;
     case "unavailable":
       return 503;
@@ -216,7 +217,14 @@ async function invoices(req: Request, url: URL, env: Env): Promise<Response> {
   if (p.get("check") === "0") return json({ status: inv.paid ? "paid" : "open", invoice: publicInvoice(inv, url.origin), checked: false });
   const c = await checkInvoice(kv, chain, inv);
   const extra =
-    c.status === "open" ? { clamped: c.inbox.clamped, truncated: c.inbox.truncated, possible: c.inbox.payments.filter((x) => x.possible === true).map(({ amountUnits: _u, ...x }) => x), head: c.inbox.head }
+    c.status === "open" ? {
+      clamped: c.inbox.clamped,
+      truncated: c.inbox.truncated,
+      possible: c.inbox.payments.filter((x) => x.possible === true).map(({ amountUnits: _u, ...x }) => x),
+      // Payments with the reference but less than the amount. A payer must not pay the full amount again.
+      partial: c.inbox.payments.filter((x) => x.memo === inv.memo && x.matches === false).map(({ amountUnits: _u, ...x }) => x),
+      head: c.inbox.head,
+    }
     : c.status === "confirming" ? { payment: { ...c.payment, explorer: `${chain.explorer}/tx/${c.payment.txHash}` }, confirmations: c.confirmations, required: c.required, head: c.inbox?.head }
     : c.status === "unavailable" ? { message: c.message }
     : {};
@@ -226,7 +234,7 @@ async function invoices(req: Request, url: URL, env: Env): Promise<Response> {
 function confirmAnswer(c: Awaited<ReturnType<typeof confirmInvoice>>, origin: string) {
   const chain = chainById(c.invoice.chainId)!;
   const base = { status: c.status, invoice: publicInvoice(c.invoice, origin), required: CONFIRMATIONS_REQUIRED };
-  if (c.status === "paid") return { ...base, sameTx: c.sameTx, ...(c.sameTx ? {} : { message: `Invoice ${c.invoice.memo} is already paid by another transaction.` }) };
+  if (c.status === "paid") return base;
   if (c.status === "confirming") return { ...base, payment: { ...c.payment, explorer: `${chain.explorer}/tx/${c.payment.txHash}` }, confirmations: c.confirmations, message: `The payment matches. It has ${c.confirmations} of ${c.required} confirmations. Confirm again in a few seconds.` };
   return { ...base, message: c.message };
 }
@@ -365,12 +373,14 @@ export default {
         const key = req.headers.get("cf-connecting-ip") ?? "local";
         // The in-isolate counter catches bursts at once. The Cloudflare binding counts across isolates in
         // a location, with some delay. A request must pass both.
-        const local = req.method === "POST" ? localLimit("create:" + key, Date.now(), CREATE_LIMIT) : localLimit(key);
-        const rule = req.method === "POST" ? CREATE_LIMIT : RATE_LIMIT;
+        // Three budgets per client. Creating invoices, confirming by hash and reading the chain do not eat into each other.
+        const kind = req.method !== "POST" ? "read" : url.pathname.endsWith("/confirm") ? "confirm" : "create";
+        const rule = kind === "read" ? RATE_LIMIT : CREATE_LIMIT;
+        const local = kind === "read" ? localLimit(key) : localLimit(kind + ":" + key, Date.now(), rule);
         let exact: boolean | null = null;
         if (local && env.CLIENT_LIMITER) {
           try {
-            const name = (req.method === "POST" ? "create:" : "read:") + key;
+            const name = kind + ":" + key;
             const stub = env.CLIENT_LIMITER.get(env.CLIENT_LIMITER.idFromName(name));
             exact = (await stub.fetch(new Request(`https://limiter/?limit=${rule.limit}&period=${rule.periodSeconds}`))).status === 200;
           } catch {
@@ -379,7 +389,7 @@ export default {
         }
         const bound = local && exact !== false && env.LIMITER ? (await env.LIMITER.limit({ key })).success : null;
         const allowed = local && exact !== false && bound !== false;
-        if (!allowed) return json({ error: `Too many chain reads. The limit is ${RATE_LIMIT.limit} a minute per client.` }, 429, { "retry-after": String(RATE_LIMIT.periodSeconds) });
+        if (!allowed) return json({ error: `Too many requests. The limit is ${rule.limit} a minute per client for this kind of call.` }, 429, { "retry-after": String(rule.periodSeconds) });
       }
       try {
         const res = isInvoices ? await invoices(req, url, env) : await api(url);

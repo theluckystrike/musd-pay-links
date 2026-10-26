@@ -166,7 +166,9 @@ describe("confirm by transaction hash", () => {
     expect(auto).toMatchObject({ status: "open" });
     if (auto.status === "open") expect(auto.inbox.clamped).toBe(true);
     const c = await confirmInvoice(kv, MEZO_TESTNET, inv, h(11), f);
-    expect(c).toMatchObject({ status: "paid", sameTx: true, invoice: { paid: { txHash: h(11), block: HEAD - 25_000, from: PAYER, amount: "5" } } });
+    expect(c).toMatchObject({ status: "paid", invoice: { paid: { txHash: h(11), block: HEAD - 25_000, from: PAYER, amount: "5" } } });
+    // Confirming the same transaction again is still paid.
+    expect((await confirmInvoice(kv, MEZO_TESTNET, (await getInvoice(kv, MEZO_TESTNET.id, "INV-C"))!, h(11), f)).status).toBe("paid");
     expect(kv.data.get(`tx:31611:${h(11)}`)).toBe("INV-C");
     expect((await getInvoice(kv, MEZO_TESTNET.id, "INV-C"))!.paid?.txHash).toBe(h(11));
   });
@@ -214,9 +216,10 @@ describe("double payment", () => {
     expect(c.status).toBe("paid");
     expect(c.invoice.paid?.txHash).toBe(h(21));
     expect(payPageLock({ status: c.status, invoice: c.invoice, checked: true })).toBe("paid");
-    // Confirming the second transaction keeps the first one and says so.
+    // Confirming the second transaction keeps the first one and reports a second payment with 409.
     const again = await confirmInvoice(kv, MEZO_TESTNET, (await getInvoice(kv, MEZO_TESTNET.id, "INV-2X"))!, h(22), f);
-    expect(again).toMatchObject({ status: "paid", sameTx: false, invoice: { paid: { txHash: h(21) } } });
+    expect(again).toMatchObject({ status: "already_paid", invoice: { paid: { txHash: h(21) } } });
+    expect(statusCode(again.status)).toBe(409);
   });
 
   it("locks Pay while the first payment is still shallow", async () => {
@@ -239,6 +242,9 @@ describe("pay page lock", () => {
     expect(payPageLock({ status: "open", invoice: inv, checked: true, truncated: true })).toBe("cannot_prove");
     expect(payPageLock({ status: "unavailable", invoice: inv, checked: true })).toBe("unavailable");
     expect(payPageLock({ status: "something_new", invoice: inv, checked: true })).toBe("unavailable");
+    expect(payPageLock({ status: "open", invoice: inv, checked: true, possible: [{ txHash: "0x1" }] })).toBe("possible");
+    expect(payPageLock({ status: "open", invoice: inv, checked: true, possible: [] })).toBeNull();
+    expect(payPageLock({ status: "open", invoice: inv, checked: true, partial: [{ txHash: "0x2" }], possible: [{ txHash: "0x1" }] })).toBe("partial");
   });
   it("tells a missing invoice from a refused request", () => {
     expect(payPageLock({ http: 404 })).toBe("not_found");
@@ -326,11 +332,31 @@ describe("invoice routes", () => {
       const wrong = await post("/api/invoices/INV-K/confirm?chain=31611", JSON.stringify({ tx: h(42) }));
       expect(wrong.status).toBe(404);
       const res = await post("/api/invoices/INV-K/confirm?chain=31611", JSON.stringify({ tx: h(41) }));
-      const body = (await res.json()) as { status: string; sameTx: boolean; invoice: { paid: { txHash: string }; explorer: string } };
+      const body = (await res.json()) as { status: string; invoice: { paid: { txHash: string }; explorer: string } };
       expect(res.status).toBe(200);
-      expect(body).toMatchObject({ status: "paid", sameTx: true, invoice: { paid: { txHash: h(41) } } });
+      expect(body).toMatchObject({ status: "paid", invoice: { paid: { txHash: h(41) } } });
       expect(body.invoice.explorer).toBe(`${MEZO_TESTNET.explorer}/tx/${h(41)}`);
       expect((await getInvoice(e.INVOICES, MEZO_TESTNET.id, "INV-K"))!.paid?.txHash).toBe(h(41));
+    });
+
+    it("lists a smaller payment with the reference as partial, so the pay page does not invite a full second payment", async () => {
+      const e = env();
+      await createInvoice(e.INVOICES, MEZO_TESTNET, { to: SHOP, amount: "5", memo: "INV-PART" }, HEAD - 100);
+      vi.stubGlobal("fetch", chainWith([{ tx: h(61), block: HEAD - 50, units: 2n * E, memo: "INV-PART" }]));
+      const body = (await (await call(e, "/api/invoices/INV-PART?chain=31611")).json()) as { status: string; checked: boolean; partial: { txHash: string; amount: string }[]; possible: unknown[] };
+      expect(body).toMatchObject({ status: "open", checked: true, partial: [{ txHash: h(61), amount: "2" }], possible: [] });
+      expect(payPageLock(body)).toBe("partial");
+    });
+
+    it("gives confirm calls their own budget, so they do not use up invoice creation", async () => {
+      const e = env();
+      const ip = { "cf-connecting-ip": "198.19.5.5" };
+      for (let i = 0; i < 10; i++) await call(e, "/api/invoices/INV-NONE/confirm?chain=31611", { method: "POST", body: "{}", headers: ip });
+      const over = await call(e, "/api/invoices/INV-NONE/confirm?chain=31611", { method: "POST", body: "{}", headers: ip });
+      expect(over.status).toBe(429);
+      expect(((await over.json()) as { error: string }).error).toBe("Too many requests. The limit is 10 a minute per client for this kind of call.");
+      // Creation from the same client is still allowed (400 for the empty body, not 429).
+      expect((await call(e, "/api/invoices", { method: "POST", body: "{nope", headers: ip })).status).toBe(400);
     });
 
     it("reads an invoice whose reference is the word confirm", async () => {
