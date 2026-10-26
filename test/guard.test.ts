@@ -134,8 +134,23 @@ describe("recipient checks", () => {
     expect(codes(link({ query: `?address=${bad}&uint256=1` }))).toEqual(["recipient_bad_checksum"]);
   });
 
-  it("refuses a recipient without checksum by default", () => {
-    expect(codes(link({ query: `?address=${SHOP.toLowerCase()}&uint256=1` }))).toEqual(["recipient_no_checksum"]);
+  it("accepts a lowercase or uppercase recipient by default, with the warning recipient_no_checksum", () => {
+    for (const addr of [SHOP.toLowerCase(), "0x" + SHOP.slice(2).toUpperCase()]) {
+      const r = checkPaymentLink(link({ query: `?address=${addr}&uint256=1` }), policy);
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      expect(r.payment.recipient).toBe(SHOP);
+      expect(r.warnings.map((w) => w.code)).toEqual(["recipient_no_checksum"]);
+    }
+  });
+
+  it("refuses a recipient without checksum when the payer requires one", () => {
+    expect(codes(link({ query: `?address=${SHOP.toLowerCase()}&uint256=1` }), { ...policy, requireChecksum: true })).toEqual(["recipient_no_checksum"]);
+  });
+
+  it("gives no warning for a checksummed recipient", () => {
+    const r = checkPaymentLink(link(), policy);
+    expect(r.ok && r.warnings).toEqual([]);
   });
 
   it("refuses the zero address", () => {

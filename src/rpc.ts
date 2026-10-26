@@ -113,7 +113,7 @@ export interface VerifyInput {
 }
 
 export type VerifyResult =
-  | { status: "paid"; paid: string; confirmations: number; memoMatched: boolean | null; block: number }
+  | { status: "paid"; paid: string; confirmations: number; memoMatched: boolean | null; block: number; from?: string }
   | { status: "pending" | "not_found" | "failed" | "mismatch" | "unavailable"; message: string };
 
 /** Shown when every RPC try failed, so the reader does not mistake it for an invalid payment. */
@@ -121,6 +121,7 @@ export const NETWORK_UNAVAILABLE_MESSAGE = "The network did not answer. Try agai
 
 interface Receipt {
   status: string;
+  from?: string;
   blockNumber: string;
   to: string | null;
   logs: { address: string; topics: string[]; data: string }[];
@@ -203,7 +204,8 @@ export async function verifyPayment(chain: MezoChain, input: VerifyInput, fetchI
   }
   const block = Number(receipt.blockNumber);
   const head = headRaw ? Number(headRaw) : block;
-  return { status: "paid", paid: formatAmount(paid), confirmations: head - block + 1, memoMatched, block };
+  const from = receipt.from && /^0x[0-9a-fA-F]{40}$/.test(receipt.from) ? getAddress(receipt.from) : undefined;
+  return { status: "paid", paid: formatAmount(paid), confirmations: Math.max(1, head - block + 1), memoMatched, block, ...(from ? { from } : {}) };
 }
 
 /** Most blocks one eth_getLogs call asks for. The Mezo testnet RPC refuses ranges above 10,000. */
@@ -273,10 +275,16 @@ export interface FoundPayment {
   amount: string;
   amountUnits: bigint;
   memo: string | null;
-  /** True when the payment carries the wanted reference and at least the wanted amount. */
-  matches: boolean;
-  /** True when the payment carries no reference but has exactly the wanted amount. Needs a human check. */
-  possible: boolean;
+  /**
+   * True when the payment carries the wanted reference and at least the wanted amount.
+   * null when the search had no reference, so nothing was evaluated.
+   */
+  matches: boolean | null;
+  /**
+   * True when the payment carries no reference but has exactly the wanted amount. Needs a human check.
+   * null when the search had no amount, so nothing was evaluated.
+   */
+  possible: boolean | null;
 }
 
 export interface FindInput {
@@ -345,11 +353,11 @@ export async function findPayments(chain: MezoChain, input: FindInput, fetchImpl
       const tx = txs[i];
       const direct = !!tx && tx.to?.toLowerCase() === chain.musd.toLowerCase();
       const memo = direct ? memoFromInput(tx!.input) : null;
-      const matches = !!input.memo && memo === input.memo && p.units >= (input.amount ?? 0n);
-      const possible = memo === null && input.amount != null && p.units === input.amount;
+      const matches = input.memo ? memo === input.memo && p.units >= (input.amount ?? 0n) : null;
+      const possible = input.amount != null ? memo === null && p.units === input.amount : null;
       return { txHash, block: p.block, from: p.from, amount: formatAmount(p.units), amountUnits: p.units, memo, matches, possible };
     });
-    const paid = [...payments].reverse().find((p) => p.matches) ?? null;
+    const paid = [...payments].reverse().find((p) => p.matches === true) ?? null;
     return { status: "ok", head, fromBlock: start, clamped: wanted < floor, truncated, payments, paid };
   } catch (e) {
     return { status: "unavailable", message: NETWORK_UNAVAILABLE_MESSAGE, detail: String((e as Error)?.message ?? e).slice(0, 200) };

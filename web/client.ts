@@ -4,9 +4,10 @@ import { getAddress } from "viem";
 
 import { formatAmount, parseAmount } from "../src/amount.ts";
 import { pct } from "../src/borrow.ts";
-import { chainById, MEZO_TESTNET } from "../src/chains.ts";
+import { chainById, CONFIRMATIONS_REQUIRED, MEZO_TESTNET } from "../src/chains.ts";
 import { checkPaymentLink, type CheckResult } from "../src/guard.ts";
 import { createPaymentLink } from "../src/merchant.ts";
+import { payPageLock } from "../src/paystate.ts";
 import { qrSvg } from "../src/qr.ts";
 
 const $ = <T = HTMLInputElement>(id: string) => document.getElementById(id) as unknown as T;
@@ -45,6 +46,19 @@ const EXAMPLES: [string, string][] = [
 ];
 
 let lastCheck: CheckResult | null = null;
+/** The invoice behind a pay page (/?invoice=...), or null for a plain link. */
+let payInvoice: { chainId: number; memo: string } | null = null;
+/** Why Pay is locked, or null. A pay page locks Pay when the chain shows a matching payment, or when it cannot tell. */
+let payLock: string | null = null;
+/** Polling interval of "Watch for this payment". 4 calls a minute, so a merchant who watches stays far below the read limit. */
+const WATCH_INTERVAL_MS = 15_000;
+
+function setPayButton(): void {
+  const eth = (window as unknown as { ethereum?: unknown }).ethereum;
+  const b = $<HTMLButtonElement>("p-pay");
+  b.disabled = !(lastCheck?.ok && eth) || payLock !== null;
+  b.title = payLock ?? (eth ? "" : "No browser wallet found");
+}
 
 function renderVerdict(r: CheckResult): string {
   if (!r.ok) {
@@ -53,7 +67,8 @@ function renderVerdict(r: CheckResult): string {
   }
   const p = r.payment;
   const chain = chainById(p.chainId)!;
-  return `<div class="verdict ok"><strong>Safe to pay. All checks passed.</strong>
+  const warn = r.warnings.length ? r.warnings.map((w) => `<div class="note"><code>${esc(w.code)}</code> ${esc(w.message)}</div>`).join("") : "";
+  return `<div class="verdict ok"><strong>${r.warnings.length ? "Safe to pay after one check. Read the warning." : "Safe to pay. All checks passed."}</strong>${warn}
     <dl class="kv">
       <dt>Network</dt><dd>${esc(p.chainName)} (${p.chainId})</dd>
       <dt>Token</dt><dd><a href="${chain.explorer}/token/${p.token}" target="_blank" rel="noopener">MUSD ${esc(p.token)}</a></dd>
@@ -77,10 +92,8 @@ function runCheck(): void {
   });
   lastCheck = r;
   const shown = /[^\x21-\x7e]/.test(link) ? `<div class="muted">What the guard sees</div><div class="mono">${esc(visible(link))}</div>` : "";
-  $("p-out").innerHTML = shown + renderVerdict(r);
-  const eth = (window as unknown as { ethereum?: unknown }).ethereum;
-  $<HTMLButtonElement>("p-pay").disabled = !(r.ok && eth);
-  $<HTMLButtonElement>("p-pay").title = eth ? "" : "No browser wallet found";
+  $("p-out").innerHTML = shown + renderVerdict(r) + (payLock ? `<div class="note">${esc(payLock)}</div>` : "");
+  setPayButton();
 }
 
 // Invoices live in the Worker's KV store, so they survive a reload and work on another device.
@@ -88,7 +101,10 @@ interface ServerInvoice {
   chainId: number; to: string; amount: string; units: string; memo: string; fromBlock: number; createdAt: string; link: string;
   payUrl: string; explorer: string | null; paid?: { txHash: string; block: number; from: string; amount: string };
 }
-interface InvoiceAnswer { status: string; invoice?: ServerInvoice; possible?: InboxPayment[]; clamped?: boolean; truncated?: boolean; head?: number; message?: string; error?: string; reasons?: { code: string; message: string }[] }
+interface InvoiceAnswer {
+  status: string; checked?: boolean; http?: number; invoice?: ServerInvoice; possible?: InboxPayment[]; clamped?: boolean; truncated?: boolean; head?: number; message?: string; error?: string;
+  reasons?: { code: string; message: string }[]; payment?: InboxPayment & { explorer?: string }; confirmations?: number; required?: number;
+}
 interface InboxPayment { txHash: string; block: number; from: string; amount: string; memo: string | null; possible?: boolean }
 
 let memoEdited = false;
@@ -113,7 +129,9 @@ async function loadInvoices(): Promise<void> {
         const cell = $(`inv-st-${b.dataset.i}`);
         cell.textContent = "checking...";
         const a = await fetchInvoice(Number(chain), b.dataset.memo!, true);
-        cell.innerHTML = a.status === "paid" && a.invoice?.explorer ? `<a href="${esc(a.invoice.explorer)}" target="_blank" rel="noopener">paid</a>` : esc(a.status === "open" ? (a.possible?.length ? "open, possible match" : "open") : (a.message ?? a.error ?? a.status));
+        cell.innerHTML = a.status === "paid" && a.invoice?.explorer ? `<a href="${esc(a.invoice.explorer)}" target="_blank" rel="noopener">paid</a>`
+          : a.status === "confirming" ? esc(`confirming, ${a.confirmations} of ${a.required}`)
+          : esc(a.status === "open" ? (a.possible?.length ? "open, possible match" : "open") : (a.message ?? a.error ?? a.status));
       };
     });
   } catch (e) {
@@ -124,7 +142,7 @@ async function loadInvoices(): Promise<void> {
 async function fetchInvoice(chainId: number, memo: string, check: boolean): Promise<InvoiceAnswer> {
   try {
     const res = await fetch(`/api/invoices/${encodeURIComponent(memo)}?chain=${chainId}${check ? "" : "&check=0"}`);
-    return (await res.json()) as InvoiceAnswer;
+    return { ...((await res.json()) as InvoiceAnswer), http: res.status };
   } catch {
     return { status: "unavailable", message: "The network did not answer." };
   }
@@ -211,6 +229,10 @@ function renderInvoiceAnswer(a: InvoiceAnswer): string {
       <dl class="kv"><dt>From</dt><dd>${esc(inv.paid.from)}</dd><dt>Block</dt><dd>${inv.paid.block}</dd>
       <dt>Transaction</dt><dd><a href="${esc(inv.explorer ?? "")}" target="_blank" rel="noopener">${esc(inv.paid.txHash)}</a></dd></dl></div>`;
   }
+  if (a.status === "confirming" && a.payment) {
+    return `<div class="verdict ok"><strong>Payment found. ${esc(String(a.confirmations))} of ${esc(String(a.required))} confirmations.</strong> The invoice is recorded as paid at ${esc(String(a.required))} confirmations, about 20 seconds.
+      <dl class="kv"><dt>Transaction</dt><dd><a href="${esc(a.payment.explorer ?? "")}" target="_blank" rel="noopener">${esc(a.payment.txHash)}</a></dd></dl></div>`;
+  }
   if (a.status !== "open") return `<div class="muted">${esc(a.message ?? a.error ?? a.status)} Trying again.</div>`;
   const possible = a.possible ?? [];
   const maybe = possible.length
@@ -236,22 +258,95 @@ async function watchInvoice(chainId: number, memo: string): Promise<void> {
       return;
     }
     if (Date.now() - started > 15 * 60_000) return;
-    watchTimer = window.setTimeout(() => void tick(), 8000);
+    watchTimer = window.setTimeout(() => void tick(), WATCH_INTERVAL_MS);
   };
   await tick();
 }
 
 type Eip1193 = { request(args: { method: string; params?: unknown[] }): Promise<unknown> };
 
+/**
+ * Pay page state from a chain check of the invoice. Pay stays locked unless the chain shows that the
+ * invoice is open and the search covered every block since the invoice was created.
+ */
+function applyInvoiceState(a: InvoiceAnswer): void {
+  const inv = a.invoice;
+  const banner = $("pay-banner");
+  const again = `<div class="actions"><button class="ghost small" id="pay-recheck" type="button">Check again</button></div>`;
+  const lock = payPageLock(a);
+  if (lock === "not_found") {
+    payLock = "This invoice was not found.";
+    banner.innerHTML = `<strong>${esc(a.error ?? "This invoice was not found.")}</strong>`;
+  } else if (lock === "paid" && inv) {
+    payLock = "This invoice is already paid. Do not pay it again.";
+    banner.innerHTML = `<strong>Invoice ${esc(inv.memo)} is already paid.</strong> Do not pay it again. <a href="${esc(inv.explorer ?? "")}" target="_blank" rel="noopener">See the payment</a>.`;
+  } else if (lock === "confirming" && inv) {
+    payLock = "A payment for this invoice is already on chain. Do not pay it again.";
+    banner.innerHTML = `<strong>A payment for invoice ${esc(inv.memo)} is on chain, ${esc(String(a.confirmations))} of ${esc(String(a.required))} confirmations.</strong> Do not pay it again. <a href="${esc(a.payment?.explorer ?? "")}" target="_blank" rel="noopener">See the payment</a>.${again}`;
+  } else if (lock === "cannot_prove" && inv) {
+    payLock = "This page cannot prove that the invoice is unpaid.";
+    banner.innerHTML = `<strong>Invoice ${esc(inv.memo)}. This page cannot prove that it is unpaid.</strong> ${a.clamped ? "The invoice is older than the search window of about 23 hours." : "The merchant address has more payments than the page reads."} Ask the merchant for a new invoice.`;
+  } else if (lock === null && inv) {
+    payLock = null;
+    const maybe = a.possible?.length ? ` <strong>Warning.</strong> ${a.possible.length} payment(s) of exactly this amount arrived without the reference. If one is yours, do not pay again.` : "";
+    banner.innerHTML = `<strong>Invoice ${esc(inv.memo)}. ${esc(inv.amount)} MUSD on ${esc(chainById(inv.chainId)?.name ?? "")}.</strong> The chain shows no payment for it up to block ${(a.head ?? 0).toLocaleString("en-US")}. The guard below checked the link in your browser. Set your limit, then pay from your wallet or check your balance first.${maybe}`;
+  } else {
+    payLock = "The chain could not be checked, so Pay is locked.";
+    banner.innerHTML = `<strong>Could not check on chain whether invoice ${esc(inv?.memo ?? payInvoice?.memo ?? "")} is paid.</strong> ${esc(a.error ?? a.message ?? "")} Pay is locked until the check works.${again}`;
+  }
+  const btn = document.getElementById("pay-recheck");
+  if (btn && payInvoice) btn.onclick = () => void loadPayInvoice(payInvoice!.chainId, payInvoice!.memo);
+  setPayButton();
+}
+
+async function loadPayInvoice(chainId: number, memo: string): Promise<InvoiceAnswer> {
+  payInvoice = { chainId, memo };
+  payLock = "Checking the chain for an earlier payment...";
+  setPayButton();
+  $("pay-banner").innerHTML = `<strong>Checking the chain for a payment of invoice ${esc(memo)}...</strong>`;
+  const a = await fetchInvoice(chainId, memo, true);
+  if (a.invoice) {
+    $<HTMLSelectElement>("p-net").value = String(chainId);
+    $<HTMLTextAreaElement>("p-link").value = a.invoice.link;
+  }
+  applyInvoiceState(a);
+  if (a.invoice) runCheck();
+  return a;
+}
+
+async function confirmByHash(chainId: number, memo: string, tx: string): Promise<InvoiceAnswer> {
+  try {
+    const res = await fetch(`/api/invoices/${encodeURIComponent(memo)}/confirm?chain=${chainId}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tx }),
+    });
+    return (await res.json()) as InvoiceAnswer;
+  } catch {
+    return { status: "unavailable", message: "The network did not answer." };
+  }
+}
+
 async function payWithWallet(): Promise<void> {
-  if (!lastCheck || !lastCheck.ok) return;
+  if (!lastCheck || !lastCheck.ok || payLock) return;
   const eth = (window as unknown as { ethereum?: Eip1193 }).ethereum;
   if (!eth) return;
   const { tx, payment } = lastCheck;
   const chain = chainById(tx.chainId)!;
   const out = $("p-out");
   const status = (html: string) => (out.innerHTML = renderVerdict(lastCheck!) + `<div class="note">${html}</div>`);
+  const btn = $<HTMLButtonElement>("p-pay");
+  btn.disabled = true;
   try {
+    // Check the chain again right before sending. The page may have been open for a long time.
+    if (payInvoice) {
+      const a = await fetchInvoice(payInvoice.chainId, payInvoice.memo, true);
+      applyInvoiceState(a);
+      if (payLock) {
+        status(`${esc(payLock)} Nothing was sent.`);
+        return;
+      }
+    }
     const [from] = (await eth.request({ method: "eth_requestAccounts" })) as string[];
     const hexId = "0x" + chain.id.toString(16);
     try {
@@ -274,13 +369,25 @@ async function payWithWallet(): Promise<void> {
     }
     const sentAfter = await headBlock(chain.id);
     const hash = (await eth.request({ method: "eth_sendTransaction", params: [{ from, to: tx.to, value: "0x0", data: tx.data }] })) as string;
-    status(`Sent. <a href="${chain.explorer}/tx/${esc(hash)}" target="_blank" rel="noopener">${esc(hash)}</a>. Waiting for the receipt...`);
-    for (let i = 0; i < 30; i++) {
-      await new Promise((res) => setTimeout(res, 3000));
+    // One payment per page load. A second click must not send a second transfer.
+    payLock = "You sent a payment from this page. Reload the page to check its state before you pay again.";
+    const link = `<a href="${chain.explorer}/tx/${esc(hash)}" target="_blank" rel="noopener">${esc(hash)}</a>`;
+    status(`Sent. ${link}. Waiting for the receipt...`);
+    for (let i = 0; i < 40; i++) {
+      await new Promise((res) => setTimeout(res, 4000));
       const q = new URLSearchParams({ chain: String(chain.id), tx: hash, to: payment.recipient, amount: payment.amountText, memo: payment.memo ?? "", from_block: sentAfter === null ? "" : String(sentAfter) });
       const v = (await (await fetch(`/api/verify?${q}`)).json()) as { status: string; confirmations?: number; message?: string };
+      if (v.status === "paid" && (v.confirmations ?? 0) < CONFIRMATIONS_REQUIRED) {
+        status(`Mined. ${link}. ${v.confirmations} of ${CONFIRMATIONS_REQUIRED} confirmations. Do not pay again.`);
+        continue;
+      }
       if (v.status === "paid") {
-        status(`Confirmed on chain. ${esc(payment.amountText)} MUSD received, ${v.confirmations} confirmation(s). <a href="${chain.explorer}/tx/${esc(hash)}" target="_blank" rel="noopener">View in explorer</a>`);
+        let rec = "";
+        if (payInvoice) {
+          const c = await confirmByHash(payInvoice.chainId, payInvoice.memo, hash);
+          rec = c.status === "paid" ? ` Invoice ${esc(payInvoice.memo)} is recorded as paid.` : ` The invoice was not recorded yet (${esc(c.message ?? c.status)}). The merchant can confirm it by hash.`;
+        }
+        status(`Confirmed on chain. ${esc(payment.amountText)} MUSD received, ${v.confirmations} confirmations. <a href="${chain.explorer}/tx/${esc(hash)}" target="_blank" rel="noopener">View in explorer</a>.${rec}`);
         return;
       }
       if (v.status !== "pending" && v.status !== "not_found") {
@@ -288,8 +395,11 @@ async function payWithWallet(): Promise<void> {
         return;
       }
     }
+    status(`No final answer after 160 seconds. ${link}. Do not pay again. Reload the page to see the state of the invoice.`);
   } catch (e) {
     status(`Wallet error. ${esc((e as Error).message ?? String(e))}`);
+  } finally {
+    setPayButton();
   }
 }
 
@@ -297,11 +407,13 @@ const VERIFY_RETRY_MESSAGE = "The network did not answer in time. Try again in a
 const VERIFY_NOT_FOUND_MESSAGE = "No transaction with this hash on this network. Check the hash and the network.";
 const VERIFY_TRIES = 3;
 
-function renderVerify(v: Record<string, unknown>, paid: boolean): string {
+function renderVerify(v: Record<string, unknown>, paid: boolean, memo: string): string {
   const head = paid ? `Paid. ${esc(String(v.paid))} MUSD reached the recipient.` : esc(String(v.message ?? v.error ?? v.status));
+  const deep = Number(v.confirmations ?? 0) >= CONFIRMATIONS_REQUIRED;
   return `<div class="verdict ${paid ? "ok" : "bad"}"><strong>${head}</strong>
-    ${paid ? `<dl class="kv"><dt>Block</dt><dd>${v.block}</dd><dt>Confirmations</dt><dd>${v.confirmations}</dd><dt>Reference</dt><dd>${v.memoMatched === null ? "not checked" : v.memoMatched ? "matches" : "does not match"}</dd></dl>` : ""}
-    ${v.explorer ? `<div style="margin-top:6px"><a href="${esc(String(v.explorer))}" target="_blank" rel="noopener">Open in explorer</a></div>` : ""}</div>`;
+    ${paid ? `<dl class="kv"><dt>Block</dt><dd>${v.block}</dd><dt>Confirmations</dt><dd>${v.confirmations} (${deep ? "final" : `${CONFIRMATIONS_REQUIRED} needed`})</dd><dt>Reference</dt><dd>${v.memoMatched === null ? "not checked" : v.memoMatched ? "matches" : "does not match"}</dd></dl>` : ""}
+    ${v.explorer ? `<div style="margin-top:6px"><a href="${esc(String(v.explorer))}" target="_blank" rel="noopener">Open in explorer</a></div>` : ""}
+    ${paid && memo ? `<div class="actions"><button class="ghost small" id="v-record" type="button">Record invoice ${esc(memo)} as paid</button></div><div id="v-record-out" class="muted"></div>` : ""}</div>`;
 }
 
 async function runVerify(): Promise<void> {
@@ -332,7 +444,15 @@ async function runVerify(): Promise<void> {
       out.innerHTML = `<div class="verdict bad"><strong>${esc(status === "not_found" ? VERIFY_NOT_FOUND_MESSAGE : VERIFY_RETRY_MESSAGE)}</strong></div>`;
       return;
     }
-    out.innerHTML = renderVerify(v, status === "paid");
+    out.innerHTML = renderVerify(v, status === "paid", q.get("memo") ?? "");
+    const rec = document.getElementById("v-record");
+    if (rec) {
+      rec.onclick = async () => {
+        const c = await confirmByHash(Number(q.get("chain")), q.get("memo")!, q.get("tx")!);
+        $("v-record-out").textContent = c.status === "paid" ? (c.message ?? `Invoice ${q.get("memo")} is recorded as paid.`) : c.status === "confirming" ? `${c.confirmations} of ${c.required} confirmations. Press again in a few seconds.` : (c.message ?? c.error ?? c.status);
+        void loadInvoices();
+      };
+    }
     return;
   }
 }
@@ -454,7 +574,6 @@ function init(): void {
   $("v-go").onclick = () => void runVerify();
   $("b-go").onclick = () => void runBorrow();
   $("p-net").onchange = runCheck;
-  void loadInvoices();
   const qs = new URLSearchParams(location.search);
   const shared = qs.get("pay");
   const invoiceRef = qs.get("invoice");
@@ -466,22 +585,12 @@ function init(): void {
       $<HTMLTextAreaElement>("p-link").value = shared;
       runCheck();
     } else {
-      const chainId = Number(qs.get("chain") ?? "31611");
-      void fetchInvoice(chainId, invoiceRef!, false).then((a) => {
-        if (!a.invoice) {
-          $("pay-banner").innerHTML = `<strong>${esc(a.error ?? "This invoice was not found.")}</strong>`;
-          return;
-        }
-        $("pay-banner").innerHTML = a.status === "paid"
-          ? `<strong>Invoice ${esc(a.invoice.memo)} is already paid.</strong> Do not pay it again.`
-          : `<strong>Invoice ${esc(a.invoice.memo)}. ${esc(a.invoice.amount)} MUSD on ${esc(chainById(chainId)?.name ?? "")}.</strong> The guard below checked the link in your browser. Set your limit, then pay from your wallet or check your balance first.`;
-        $<HTMLSelectElement>("p-net").value = String(chainId);
-        $<HTMLTextAreaElement>("p-link").value = a.invoice.link;
-        runCheck();
-      });
+      // The chain is checked on load, so a link that was already paid cannot be paid a second time.
+      void loadPayInvoice(Number(qs.get("chain") ?? "31611"), invoiceRef!);
     }
     $("p-h").scrollIntoView();
   } else {
+    void loadInvoices();
     void runCreate(false);
     const first = createPaymentLink({ chainId: 31611, recipient: SHOP, amount: "12.50", memo: "INV-1042" });
     if (first.ok) $<HTMLTextAreaElement>("p-link").value = first.link;

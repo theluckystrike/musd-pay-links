@@ -360,6 +360,20 @@ describe("findPayments", () => {
     expect(r.payments.find((p) => p.txHash === h(2))!.possible).toBe(false);
   });
 
+  it("returns null for matches and possible when the search had no reference or no amount", async () => {
+    const f = inbox([{ tx: h(1), block: HEAD - 3, value: 5n }], { [h(1)]: direct("INV-7", 5n) });
+    const bare = await findPayments(MEZO_TESTNET, { recipient: SHOP }, f);
+    if (bare.status !== "ok") throw new Error("expected ok");
+    expect(bare.payments[0]).toMatchObject({ memo: "INV-7", matches: null, possible: null });
+    expect(bare.paid).toBeNull();
+    const amountOnly = await findPayments(MEZO_TESTNET, { recipient: SHOP, amount: 5n }, f);
+    if (amountOnly.status !== "ok") throw new Error("expected ok");
+    expect(amountOnly.payments[0]).toMatchObject({ matches: null, possible: false });
+    const memoOnly = await findPayments(MEZO_TESTNET, { recipient: SHOP, memo: "INV-7" }, f);
+    if (memoOnly.status !== "ok") throw new Error("expected ok");
+    expect(memoOnly.payments[0]).toMatchObject({ matches: true, possible: null });
+  });
+
   it("asks again for transactions that a lagging node answered as null", async () => {
     let first = true;
     const base = inbox([{ tx: h(1), block: HEAD - 1, value: 5n }], { [h(1)]: direct("INV-7", 5n) });

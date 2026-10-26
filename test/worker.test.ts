@@ -1,7 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { MEZO_TESTNET } from "../src/chains.ts";
-import worker, { ClientLimiter, localLimit, PURE_ROUTES, RATE_LIMIT } from "../src/worker.ts";
+import { retry } from "../src/rpc.ts";
+import worker, { ClientLimiter, localLimit, PUBLIC_ERROR_MESSAGE, PURE_ROUTES, RATE_LIMIT } from "../src/worker.ts";
+
+retry.delayMs = 1;
 
 const SHOP = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed";
 const env = { ASSETS: { fetch: async () => new Response("asset") } };
@@ -38,6 +41,16 @@ describe("worker API (no network routes)", () => {
     expect(body.ok).toBe(true);
     expect(body.payment.amount).toBe("7");
     expect(body.tx.value).toBe("0");
+  });
+
+  it("accepts a lowercase recipient on /api/check with a warning, and refuses it with checksum=1", async () => {
+    const l = encodeURIComponent(`ethereum:${MEZO_TESTNET.musd}@31611/transfer?address=${SHOP.toLowerCase()}&uint256=7`);
+    const ok = await get(`/api/check?max=1&link=${l}`);
+    expect(ok.status).toBe(200);
+    expect(((await ok.json()) as { warnings: { code: string }[] }).warnings.map((w) => w.code)).toEqual(["recipient_no_checksum"]);
+    expect((await get(`/api/check?max=1&checksum=1&link=${l}`)).status).toBe(422);
+    const bad = encodeURIComponent(`ethereum:${MEZO_TESTNET.musd}@31611/transfer?address=${SHOP.replace("aAeb", "AAeb")}&uint256=7`);
+    expect((await get(`/api/check?max=1&link=${bad}`)).status).toBe(422);
   });
 
   it("requires a payer limit on /api/check", async () => {
@@ -137,5 +150,26 @@ describe("worker API (no network routes)", () => {
     const broken = { idFromName: () => 1, get: () => ({ fetch: async () => { throw new Error("down"); } }) };
     const res = await worker.fetch(new Request("https://x.test/api/head?chain=7", { headers: { "cf-connecting-ip": "100.64.0.2" } }), { ...env, CLIENT_LIMITER: broken });
     expect(res.status).toBe(400);
+  });
+
+  describe("public error text", () => {
+    afterEach(() => vi.unstubAllGlobals());
+
+    it("returns a fixed message, not the exception text, when a route throws", async () => {
+      vi.stubGlobal("fetch", async () => {
+        throw new Error("internal-detail-1234 at node 10.0.0.7");
+      });
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      const res = await get(`/api/head?chain=31611`, "GET", { "cf-connecting-ip": "203.0.113.200" });
+      expect(res.status).toBe(502);
+      const text = await res.text();
+      expect(JSON.parse(text)).toEqual({ error: PUBLIC_ERROR_MESSAGE });
+      expect(text).not.toContain("internal-detail");
+      const inbox = await get(`/api/payments?chain=31611&to=${SHOP}`, "GET", { "cf-connecting-ip": "203.0.113.201" });
+      expect(inbox.status).toBe(503);
+      const body = await inbox.text();
+      expect(body).not.toContain("internal-detail");
+      expect(JSON.parse(body)).not.toHaveProperty("detail");
+    });
   });
 });

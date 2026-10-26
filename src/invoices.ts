@@ -5,10 +5,10 @@
 // the amount. A transaction that paid one invoice is recorded and cannot pay a second one.
 // The store holds only what is public on chain anyway (address, amount, reference, transaction hash).
 
-import { type MezoChain } from "./chains.ts";
+import { CONFIRMATIONS_REQUIRED, type MezoChain } from "./chains.ts";
 import { type Reason } from "./eip681.ts";
 import { createPaymentLink } from "./merchant.ts";
-import { findPayments, type Fetch, type FindResult } from "./rpc.ts";
+import { findPayments, verifyPayment, type Fetch, type FindResult } from "./rpc.ts";
 
 export interface KV {
   get(key: string): Promise<string | null>;
@@ -92,27 +92,67 @@ export async function listInvoices(kv: KV, chainId: number, to: string): Promise
   return all.filter((x): x is StoredInvoice => x !== null);
 }
 
+export interface PaymentRef {
+  txHash: string;
+  block: number;
+  from: string;
+  amount: string;
+}
+
 export type InvoiceCheck =
   | { status: "paid"; invoice: StoredInvoice }
+  /** A matching payment exists but is not deep enough yet. Nothing is recorded. The payer must not pay again. */
+  | { status: "confirming"; invoice: StoredInvoice; payment: PaymentRef; confirmations: number; required: number; inbox?: Extract<FindResult, { status: "ok" }> }
   | { status: "open"; invoice: StoredInvoice; inbox: Extract<FindResult, { status: "ok" }> }
   | { status: "unavailable"; invoice: StoredInvoice; message: string };
 
+/** Write the payment into the invoice and claim the transaction for it, so it cannot pay a second invoice. */
+async function recordPaid(kv: KV, chainId: number, invoice: StoredInvoice, p: PaymentRef, now: Date): Promise<StoredInvoice> {
+  const paid: StoredInvoice = { ...invoice, paid: { txHash: p.txHash, block: p.block, from: p.from, amount: p.amount, at: now.toISOString() } };
+  await kv.put(txKey(chainId, p.txHash), invoice.memo, { expirationTtl: INVOICE_TTL_SECONDS });
+  await kv.put(invKey(chainId, invoice.memo), JSON.stringify(paid), { expirationTtl: INVOICE_TTL_SECONDS });
+  return paid;
+}
+
 /**
- * Look for the payment of an open invoice on chain and record it once found. A transaction that is already
- * recorded for another invoice is skipped, so it cannot pay two invoices.
+ * Look for the payment of an open invoice on chain and record it once found and at least
+ * CONFIRMATIONS_REQUIRED blocks deep. A transaction that is already recorded for another invoice is
+ * skipped, so it cannot pay two invoices. A matching payment that is not deep enough yet gives
+ * "confirming", so a pay page can lock the Pay button before the invoice is recorded.
  */
 export async function checkInvoice(kv: KV, chain: MezoChain, invoice: StoredInvoice, fetchImpl?: Fetch, now: Date = new Date()): Promise<InvoiceCheck> {
   if (invoice.paid) return { status: "paid", invoice };
   const inbox = await findPayments(chain, { recipient: invoice.to, fromBlock: invoice.fromBlock, memo: invoice.memo, amount: BigInt(invoice.units) }, fetchImpl);
   if (inbox.status !== "ok") return { status: "unavailable", invoice, message: inbox.message };
-  const candidates = [...inbox.payments].reverse().filter((p) => p.matches); // oldest first
+  const candidates = [...inbox.payments].reverse().filter((p) => p.matches === true); // oldest first
   for (const p of candidates) {
     const owner = await kv.get(txKey(chain.id, p.txHash));
     if (owner && owner !== invoice.memo) continue;
-    const paid: StoredInvoice = { ...invoice, paid: { txHash: p.txHash, block: p.block, from: p.from, amount: p.amount, at: now.toISOString() } };
-    await kv.put(txKey(chain.id, p.txHash), invoice.memo, { expirationTtl: INVOICE_TTL_SECONDS });
-    await kv.put(invKey(chain.id, invoice.memo), JSON.stringify(paid), { expirationTtl: INVOICE_TTL_SECONDS });
-    return { status: "paid", invoice: paid };
+    const ref: PaymentRef = { txHash: p.txHash, block: p.block, from: p.from, amount: p.amount };
+    const confirmations = inbox.head - p.block + 1;
+    if (confirmations < CONFIRMATIONS_REQUIRED) return { status: "confirming", invoice, payment: ref, confirmations, required: CONFIRMATIONS_REQUIRED, inbox };
+    return { status: "paid", invoice: await recordPaid(kv, chain.id, invoice, ref, now) };
   }
   return { status: "open", invoice, inbox };
+}
+
+export type ConfirmResult =
+  | { status: "paid"; invoice: StoredInvoice; sameTx: boolean }
+  | { status: "confirming"; invoice: StoredInvoice; payment: PaymentRef; confirmations: number; required: number }
+  | { status: "tx_used" | "pending" | "not_found" | "failed" | "mismatch" | "unavailable"; invoice: StoredInvoice; message: string };
+
+/**
+ * Confirm an invoice by transaction hash, for payments the automatic search cannot see (an invoice older
+ * than the search window, or a busy address). The transaction is checked against the stored invoice
+ * (recipient, amount, reference, invoice block), never against values from the caller, so anyone may call it.
+ */
+export async function confirmInvoice(kv: KV, chain: MezoChain, invoice: StoredInvoice, txHash: string, fetchImpl?: Fetch, now: Date = new Date()): Promise<ConfirmResult> {
+  if (invoice.paid) return { status: "paid", invoice, sameTx: invoice.paid.txHash.toLowerCase() === txHash.toLowerCase() };
+  const v = await verifyPayment(chain, { txHash, recipient: invoice.to, amount: BigInt(invoice.units), memo: invoice.memo, fromBlock: invoice.fromBlock }, fetchImpl);
+  if (v.status !== "paid") return { status: v.status, invoice, message: v.message };
+  const ref: PaymentRef = { txHash: txHash.toLowerCase(), block: v.block, from: v.from ?? "", amount: v.paid };
+  if (v.confirmations < CONFIRMATIONS_REQUIRED) return { status: "confirming", invoice, payment: ref, confirmations: v.confirmations, required: CONFIRMATIONS_REQUIRED };
+  const owner = await kv.get(txKey(chain.id, txHash));
+  if (owner && owner !== invoice.memo) return { status: "tx_used", invoice, message: `This transaction already paid invoice ${owner}. One transaction pays one invoice.` };
+  return { status: "paid", invoice: await recordPaid(kv, chain.id, invoice, ref, now), sameTx: true };
 }

@@ -13,6 +13,12 @@
 
 export const MUSD_DECIMALS = 18;
 
+/**
+ * Blocks a payment must have (its own block included) before an invoice is recorded as paid.
+ * About 20 seconds on Mezo Testnet. A shallow reorg can drop a payment that only one block holds.
+ */
+export const CONFIRMATIONS_REQUIRED = 5;
+
 export interface MezoChain {
   readonly id: number;
   readonly name: string;

@@ -3,12 +3,12 @@
 
 import { checkAddress } from "./address.ts";
 import { parseAmount } from "./amount.ts";
-import { chainById, MEZO_CHAINS, type MezoChain } from "./chains.ts";
+import { chainById, CONFIRMATIONS_REQUIRED, MEZO_CHAINS, type MezoChain } from "./chains.ts";
 import { checkPaymentLink } from "./guard.ts";
 import { createPaymentLink } from "./merchant.ts";
 import { qrSvg } from "./qr.ts";
 import { quoteBorrow, readBorrowTerms, type BorrowTerms } from "./borrow.ts";
-import { checkInvoice, createInvoice, getInvoice, listInvoices, type KV, type StoredInvoice } from "./invoices.ts";
+import { checkInvoice, confirmInvoice, createInvoice, getInvoice, listInvoices, type KV, type StoredInvoice } from "./invoices.ts";
 import { MEMO_PATTERN } from "./eip681.ts";
 import { findPayments, headBlock, readBalance, readTokenInfo, rpc, verifyPayment, type TokenInfo } from "./rpc.ts";
 
@@ -68,6 +68,8 @@ export const PURE_ROUTES = new Set(["/api/link", "/api/check"]);
 /** Creating invoices writes to KV, so it has its own, lower limit per client. */
 export const CREATE_LIMIT = { limit: 10, periodSeconds: 60 };
 export const RATE_LIMIT = { limit: 30, periodSeconds: 60 };
+/** The only text a caller sees when a route throws. The exception detail is logged, not returned. */
+export const PUBLIC_ERROR_MESSAGE = "The network did not answer. Try again in a moment.";
 
 function json(body: unknown, status = 200, extra: Record<string, string> = {}): Response {
   const text = JSON.stringify(body, (_k, v) => (typeof v === "bigint" ? v.toString() : v), 2);
@@ -93,10 +95,13 @@ export function statusCode(status: string): number {
     case "paid":
     case "pending":
     case "open":
+    case "confirming":
     case "ok":
       return 200;
     case "not_found":
       return 404;
+    case "tx_used":
+      return 409;
     case "unavailable":
       return 503;
     default:
@@ -165,28 +170,54 @@ async function invoices(req: Request, url: URL, env: Env): Promise<Response> {
     if (!r.ok) return json({ ok: false, reasons: r.reasons }, r.status);
     return json({ ok: true, invoice: publicInvoice(r.invoice, url.origin), qrSvg: qrSvg(r.invoice.link) }, 201);
   }
-  if (req.method !== "GET") return bad("GET or POST only", 405);
+  if (req.method !== "GET" && req.method !== "POST") return bad("GET or POST only", 405);
   const chain = chainParam(url);
   if (!chain) return bad("chain must be 31611 or 31612");
   if (rest === "") {
+    if (req.method !== "GET") return bad("GET or POST only", 405);
     const to = checkAddress(p.get("to") ?? "", false);
     if (!to.ok) return bad(to.message);
     const list = await listInvoices(kv, chain.id, to.address);
     return json({ chainId: chain.id, to: to.address, invoices: list.map((i) => publicInvoice(i, url.origin)) });
   }
+  const confirm = rest.endsWith("/confirm");
   let memo: string;
   try {
-    memo = decodeURIComponent(rest.slice(1));
+    memo = decodeURIComponent(rest.slice(1, confirm ? -"/confirm".length : undefined));
   } catch {
     return bad("Not an invoice reference.");
   }
   if (!MEMO_PATTERN.test(memo)) return bad("Not an invoice reference.");
+  if (confirm !== (req.method === "POST")) return bad(confirm ? "POST a JSON body {\"tx\":\"0x...\"} to confirm an invoice." : "GET only", 405);
   const inv = await getInvoice(kv, chain.id, memo);
   if (!inv) return bad(`No invoice ${memo} on ${chain.name}.`, 404);
-  if (p.get("check") === "0") return json({ status: inv.paid ? "paid" : "open", invoice: publicInvoice(inv, url.origin) });
+  if (confirm) {
+    let tx: unknown;
+    try {
+      tx = ((await req.json()) as { tx?: unknown }).tx;
+    } catch {
+      return bad("Send a JSON body, for example {\"tx\":\"0x...\"}");
+    }
+    if (typeof tx !== "string" || !/^0x[0-9a-fA-F]{64}$/.test(tx)) return bad("tx must be a transaction hash (0x and 64 hex characters).");
+    const c = await confirmInvoice(kv, chain, inv, tx);
+    return json(confirmAnswer(c, url.origin), statusCode(c.status));
+  }
+  if (p.get("check") === "0") return json({ status: inv.paid ? "paid" : "open", invoice: publicInvoice(inv, url.origin), checked: false });
   const c = await checkInvoice(kv, chain, inv);
-  const extra = c.status === "open" ? { clamped: c.inbox.clamped, truncated: c.inbox.truncated, possible: c.inbox.payments.filter((x) => x.possible).map(({ amountUnits: _u, ...x }) => x), head: c.inbox.head } : {};
-  return json({ status: c.status, invoice: publicInvoice(c.invoice, url.origin), ...extra, ...(c.status === "unavailable" ? { message: c.message } : {}) }, statusCode(c.status));
+  const extra =
+    c.status === "open" ? { clamped: c.inbox.clamped, truncated: c.inbox.truncated, possible: c.inbox.payments.filter((x) => x.possible === true).map(({ amountUnits: _u, ...x }) => x), head: c.inbox.head }
+    : c.status === "confirming" ? { payment: { ...c.payment, explorer: `${chain.explorer}/tx/${c.payment.txHash}` }, confirmations: c.confirmations, required: c.required, head: c.inbox?.head }
+    : c.status === "unavailable" ? { message: c.message }
+    : {};
+  return json({ status: c.status, invoice: publicInvoice(c.invoice, url.origin), checked: true, required: CONFIRMATIONS_REQUIRED, ...extra }, statusCode(c.status));
+}
+
+function confirmAnswer(c: Awaited<ReturnType<typeof confirmInvoice>>, origin: string) {
+  const chain = chainById(c.invoice.chainId)!;
+  const base = { status: c.status, invoice: publicInvoice(c.invoice, origin), required: CONFIRMATIONS_REQUIRED };
+  if (c.status === "paid") return { ...base, sameTx: c.sameTx, ...(c.sameTx ? {} : { message: `Invoice ${c.invoice.memo} is already paid by another transaction.` }) };
+  if (c.status === "confirming") return { ...base, payment: { ...c.payment, explorer: `${chain.explorer}/tx/${c.payment.txHash}` }, confirmations: c.confirmations, message: `The payment matches. It has ${c.confirmations} of ${c.required} confirmations. Confirm again in a few seconds.` };
+  return { ...base, message: c.message };
 }
 
 async function api(url: URL): Promise<Response> {
@@ -245,7 +276,8 @@ async function api(url: URL): Promise<Response> {
       const r = checkPaymentLink(p.get("link") ?? "", {
         maxAmount: max,
         allowlist: allow.length ? allow : undefined,
-        requireChecksum: p.get("checksum") !== "0",
+        // Default: a recipient with no checksum is accepted with a warning. checksum=1 refuses it.
+        requireChecksum: p.get("checksum") === "1",
       });
       return json(r, r.ok ? 200 : 422);
     }
@@ -276,7 +308,10 @@ async function api(url: URL): Promise<Response> {
       const amount = rawAmount ? parseAmount(rawAmount) : null;
       if (rawAmount && amount === null) return bad("amount must be a decimal MUSD amount, for example 12.5");
       const r = await findPayments(chain, { recipient: to.address, fromBlock, memo: p.get("memo") || null, amount });
-      if (r.status !== "ok") return json({ chainId: chain.id, ...r }, 503);
+      if (r.status !== "ok") {
+        console.error("payments unavailable", r.detail);
+        return json({ chainId: chain.id, status: r.status, message: r.message }, 503);
+      }
       const payments = r.payments.map(({ amountUnits: _u, ...rest }) => ({ ...rest, explorer: `${chain.explorer}/tx/${rest.txHash}` }));
       return json({ chainId: chain.id, ...r, payments, paid: payments.find((x) => x.txHash === r.paid?.txHash) ?? null });
     }
@@ -339,7 +374,9 @@ export default {
         for (const [k, v] of Object.entries(cors)) res.headers.set(k, v);
         return res;
       } catch (e) {
-        return bad(`The network did not answer. Try again in a moment. (${(e as Error).message})`, 502);
+        // The detail goes to the Worker log only. Callers get a fixed text, so no internal error leaks.
+        console.error("api error", url.pathname, String((e as Error)?.message ?? e).slice(0, 300));
+        return bad(PUBLIC_ERROR_MESSAGE, 502);
       }
     }
     return env.ASSETS.fetch(req);

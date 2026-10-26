@@ -14,7 +14,11 @@ export interface PayerPolicy {
   allowlist?: readonly string[];
   /** Chains the payer accepts. Defaults to Mezo Testnet and Mezo Mainnet. */
   allowedChains?: readonly number[];
-  /** Refuse addresses without an EIP-55 checksum. Defaults to true. */
+  /**
+   * Refuse recipients without an EIP-55 checksum (all one case). Defaults to false: such an address is
+   * accepted with the warning recipient_no_checksum, because most EIP-681 generators write lowercase.
+   * A mixed-case address with a wrong checksum is always refused.
+   */
   requireChecksum?: boolean;
 }
 
@@ -36,7 +40,7 @@ export interface TransferRequest {
 }
 
 export type CheckResult =
-  | { ok: true; payment: CheckedPayment; tx: TransferRequest; reasons: [] }
+  | { ok: true; payment: CheckedPayment; tx: TransferRequest; reasons: []; warnings: Reason[] }
   | { ok: false; reasons: Reason[] };
 
 const ZERO = "0x0000000000000000000000000000000000000000";
@@ -86,7 +90,9 @@ function checkToken(target: string, chainId: number, reasons: Reason[]): void {
   }
 }
 
-function checkRecipient(value: string | undefined, policy: PayerPolicy, requireChecksum: boolean, reasons: Reason[]): `0x${string}` | null {
+export const NO_CHECKSUM_WARNING = "The recipient address has no EIP-55 checksum (all one case), so a typo in it cannot be detected. Compare it with the address the merchant gave you.";
+
+function checkRecipient(value: string | undefined, policy: PayerPolicy, requireChecksum: boolean, reasons: Reason[], warnings: Reason[]): `0x${string}` | null {
   if (value === undefined) {
     reasons.push({ code: "missing_recipient", message: "The link has no address= parameter, so there is no recipient." });
     return null;
@@ -96,6 +102,7 @@ function checkRecipient(value: string | undefined, policy: PayerPolicy, requireC
     reasons.push({ code: `recipient_${r.code}`, message: `Recipient ${r.message}` });
     return null;
   }
+  if (!r.checksummed && /[a-fA-F]/.test(value)) warnings.push({ code: "recipient_no_checksum", message: NO_CHECKSUM_WARNING });
   const lower = r.address.toLowerCase();
   if (lower === ZERO) {
     reasons.push({ code: "recipient_zero", message: "The recipient is the zero address. Tokens sent there are lost." });
@@ -157,7 +164,7 @@ export function checkPaymentLink(link: unknown, policy: PayerPolicy): CheckResul
   const parsed = parseEip681(link);
   if (!parsed.ok) return { ok: false, reasons: [parsed.reason] };
   const raw = parsed.link;
-  const requireChecksum = policy.requireChecksum ?? true;
+  const requireChecksum = policy.requireChecksum ?? false;
   const allowedChains = policy.allowedChains ?? MEZO_CHAINS.map((c) => c.id);
 
   if (raw.chainId === null) {
@@ -187,8 +194,9 @@ export function checkPaymentLink(link: unknown, policy: PayerPolicy): CheckResul
   }
 
   const reasons: Reason[] = [];
+  const warnings: Reason[] = [];
   checkToken(raw.target, chain.id, reasons);
-  const recipient = checkRecipient(raw.params.get("address"), policy, requireChecksum, reasons);
+  const recipient = checkRecipient(raw.params.get("address"), policy, requireChecksum, reasons, warnings);
   const amount = checkAmount(raw.params.get("uint256"), limit, reasons);
   const memo = raw.params.get("memo") ?? null;
   if (memo !== null && !MEMO_PATTERN.test(memo)) {
@@ -206,5 +214,5 @@ export function checkPaymentLink(link: unknown, policy: PayerPolicy): CheckResul
     memo,
   };
   const tx: TransferRequest = { chainId: chain.id, to: chain.musd, value: 0n, data: buildTransferData(recipient, amount, memo) };
-  return { ok: true, payment, tx, reasons: [] };
+  return { ok: true, payment, tx, reasons: [], warnings };
 }
