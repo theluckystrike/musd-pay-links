@@ -47,15 +47,23 @@ export async function requestReviewedOpenTrove(
       throw new Error("The borrower account changed. Prepare a new loan review.");
     }
   };
+  const assertFreshReview = (fresh: PreparedOpenTrove) => {
+    const now = Date.now();
+    if (snapshot.expiresAt <= now || fresh.expiresAt <= now) {
+      throw new Error("The borrow quote expired. Prepare a new loan review. No transaction was requested.");
+    }
+  };
   try {
     await assertWallet();
     const fresh = await revalidateOpenTrove(snapshot, { account, chainId: MEZO_TESTNET.id }, fetchImpl);
+    assertFreshReview(fresh);
     const transaction = Object.freeze({ ...fresh.transaction });
     if (transaction.chainId !== "0x7b7b" || transaction.from.toLowerCase() !== account.toLowerCase()
       || transaction.to.toLowerCase() !== MEZO_TESTNET.system.borrowerOperations.toLowerCase()) {
       throw new Error("The reviewed loan does not match the pinned testnet borrower contract.");
     }
     await assertWallet();
+    assertFreshReview(fresh);
     // The caller writes its attempt while holding the browser's loan lock. No await follows this
     // callback before the single provider request, so another page task cannot swap the review.
     beforeRequest(transaction);

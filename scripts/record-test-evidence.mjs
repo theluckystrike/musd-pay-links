@@ -3,7 +3,7 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 
-const [mode, input] = process.argv.slice(2);
+const [mode, input, ...commandArgs] = process.argv.slice(2);
 if (!['offline', 'live'].includes(mode) || !input) throw new Error('Usage: record-test-evidence.mjs offline|live REPORT.json');
 if (mode === 'live' && process.env.LIVE !== '1') throw new Error('A live report requires LIVE=1 from the test run');
 const bytes = await readFile(input);
@@ -18,13 +18,16 @@ const assertionCounts = {};
 for (const test of assertions) assertionCounts[test.status] = (assertionCounts[test.status] ?? 0) + 1;
 const commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
 if (process.env.GITHUB_SHA && process.env.GITHUB_SHA !== commit) throw new Error('Report checkout differs from the workflow source commit');
+const dirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], { encoding: 'utf8' }).trim();
+if (dirty) throw new Error('Commit the source before recording a commit-linked test receipt');
 const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
 const summary = {
   recordedAt: new Date().toISOString(),
   commit,
   mode,
   liveEnvironment: process.env.LIVE === '1',
-  command: `pnpm exec vitest run --reporter=default --reporter=json --outputFile=${input}`,
+  command: commandArgs.length ? commandArgs.join(' ') : `pnpm exec vitest run --reporter=default --reporter=json --outputFile=${input}`,
+  sourceWorktreeClean: true,
   runnerReport: input,
   reportSha256: createHash('sha256').update(bytes).digest('hex'),
   success: report.success,

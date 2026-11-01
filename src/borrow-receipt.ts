@@ -4,7 +4,7 @@ import { decodeFunctionData, decodeFunctionResult, encodeFunctionData, getAddres
 
 import { type OpenTroveTransaction } from "./borrow-action.ts";
 import { CONFIRMATIONS_REQUIRED, MEZO_TESTNET, type MezoChain } from "./chains.ts";
-import { ethCall, rpc, TRANSFER_TOPIC, type Fetch } from "./rpc.ts";
+import { ethCall, rpc, rpcNotNull, TRANSFER_TOPIC, type Fetch } from "./rpc.ts";
 
 const ABI = parseAbi([
   "function openTrove(uint256,address,address) payable",
@@ -147,8 +147,8 @@ export async function verifyOpenTrove(chain: MezoChain, input: VerifyOpenTroveIn
     const bo = MEZO_TESTNET.system.borrowerOperations.toLowerCase();
     const [chainId, txRaw, receiptRaw, headRaw] = await Promise.all([
       rpc<string>(chain, "eth_chainId", [], fetchImpl),
-      rpc<unknown>(chain, "eth_getTransactionByHash", [wantedHash], fetchImpl),
-      rpc<unknown>(chain, "eth_getTransactionReceipt", [wantedHash], fetchImpl),
+      rpcNotNull<unknown>(chain, "eth_getTransactionByHash", [wantedHash], fetchImpl),
+      rpcNotNull<unknown>(chain, "eth_getTransactionReceipt", [wantedHash], fetchImpl),
       rpc<string>(chain, "eth_blockNumber", [], fetchImpl),
     ]);
     if (uint(chainId, "RPC chain") !== 31611n) throw new Error("The RPC reports a different chain");
@@ -156,7 +156,7 @@ export async function verifyOpenTrove(chain: MezoChain, input: VerifyOpenTroveIn
     if (txRaw === null && receiptRaw === null) return { status: "pending", message: "The network has not returned this borrowing transaction yet. Keep its hash and check again.", hash: wantedHash, confirmations: 0, required };
     const tx = object(txRaw, "borrowing transaction");
     const observed = transaction(tx, { ...input, hash: wantedHash }, account, bo);
-    if (receiptRaw === null) return { status: "pending", message: "The borrowing transaction has no receipt yet.", hash: wantedHash, confirmations: 0, required };
+    if (receiptRaw === null) return { status: "pending", message: "The RPC endpoints returned no borrowing receipt. Keep the hash and check again before any retry.", hash: wantedHash, confirmations: 0, required };
     const mined = receipt(receiptRaw, wantedHash, account, bo);
     if (height(tx.blockNumber, "transaction block") !== mined.block || hash(tx.blockHash, "transaction block hash") !== mined.blockHash) throw new Error("The transaction and receipt disagree about the mined block");
     const blockTag = `0x${mined.block.toString(16)}`;

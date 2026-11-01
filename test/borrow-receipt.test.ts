@@ -115,6 +115,23 @@ describe("verifyOpenTrove", () => {
     expect(seen.some((request) => request.method === "eth_call")).toBe(false);
   });
 
+  it("checks the documented fallback when the primary RPC has no historical receipt", async () => {
+    const base = fixture();
+    const receiptURLs: string[] = [];
+    const fetchImpl: Fetch = async (url, init) => {
+      const request = JSON.parse(String(init!.body)) as { method: string };
+      if (request.method === "eth_getTransactionReceipt") {
+        receiptURLs.push(String(url));
+        if (receiptURLs.length === 1) return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: null }));
+      }
+      return base(url, init);
+    };
+    const result = await verifyOpenTrove(MEZO_TESTNET, input, fetchImpl);
+    expect(result.status).toBe("confirmed");
+    expect(receiptURLs.length).toBeGreaterThanOrEqual(2);
+    expect(receiptURLs[1]).not.toBe(receiptURLs[0]);
+  });
+
   it("does not label a shallow revert final, but reports a deep canonical revert as failed", async () => {
     const reverted = receipt({ status: "0x0", logs: [] });
     const shallow = await verifyOpenTrove(MEZO_TESTNET, input, fixture({ receipt: reverted, head: "0x3eb" }));

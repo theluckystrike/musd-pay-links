@@ -4,9 +4,9 @@ import { quoteBorrow, readBorrowTerms, pct } from "../src/borrow.ts";
 import { OPEN_TROVE_EXECUTION_NOTICE, prepareOpenTrove, type PreparedOpenTrove, type OpenTroveTransaction } from "../src/borrow-action.ts";
 import { requestReviewedOpenTrove } from "../src/borrow-wallet.ts";
 import { verifyOpenTrove } from "../src/borrow-receipt.ts";
-import { MEZO_TESTNET } from "../src/chains.ts";
+import { CONFIRMATIONS_REQUIRED, MEZO_TESTNET } from "../src/chains.ts";
 import { connectPaymentWallet, type Eip1193, type WalletSession } from "../src/wallet.ts";
-import { clearRejectedAttempt, markWalletAttemptUnknown, readWalletAttempt, recordWalletHash, writeWalletAttempt } from "../src/wallet-state.ts";
+import { clearFailedWalletAttempt, clearRejectedAttempt, markWalletAttemptUnknown, readWalletAttempt, recordWalletHash, writeWalletAttempt } from "../src/wallet-state.ts";
 
 const field = (id: string) => document.getElementById(id) as HTMLInputElement;
 const box = (id: string) => document.getElementById(id) as HTMLElement;
@@ -53,7 +53,7 @@ function renderReview(prepared: PreparedOpenTrove): void {
     </dl>
     <p class="note">The protocol minimum can make this loan much larger than the invoice. Review the full debt. Closing the page does not close a loan.</p>
     <p class="muted">${esc(OPEN_TROVE_EXECUTION_NOTICE)}</p>
-    <p class="muted">This review expires at ${esc(new Date(prepared.expiresAt).toLocaleTimeString())}. A changed price, fee, account or transaction requires another review.</p>
+    <p class="muted">This review expires at ${esc(new Date(prepared.expiresAt).toLocaleTimeString())}. Freshness is checked before requesting the wallet; terms can still change before mining. A changed price, fee, account or transaction requires another review.</p>
   </div>`;
 }
 async function reviewLoan(): Promise<void> {
@@ -154,6 +154,12 @@ async function checkLoan(): Promise<void> {
     const proof = await verifyOpenTrove(MEZO_TESTNET, { account: knownAccount, hash: knownHash, expected: knownExpected });
     if (proof.status === "confirmed" && proof.position) {
       message(`Loan confirmed at block ${proof.block}. Trove collateral: ${formatAmount(proof.position.collateral)} test BTC. Trove debt: ${formatAmount(proof.position.debt)} MUSD. Wallet MUSD at that block: ${formatAmount(proof.position.musdBalance)}. These are testnet results.`);
+    } else if (proof.status === "failed" && proof.hash?.toLowerCase() === knownHash.toLowerCase()
+      && proof.required >= CONFIRMATIONS_REQUIRED && proof.confirmations != null && proof.confirmations >= proof.required
+      && navigator.locks?.request) {
+      const cleared = await navigator.locks.request(`musd-loan:${MEZO_TESTNET.id}:${knownAccount.toLowerCase()}`, { mode: "exclusive" }, () =>
+        clearFailedWalletAttempt(localStorage, MEZO_TESTNET.id, memo(knownAccount!), knownHash!));
+      message(proof.message + (cleared ? " You can prepare a new loan review." : " The saved loan request was retained; check wallet activity before any retry."));
     } else message(proof.message);
   } catch (error) { message(error instanceof Error ? error.message : "The loan result is unavailable. Do not retry the loan."); }
   finally { busy = false; button("b-loan-check").disabled = false; }

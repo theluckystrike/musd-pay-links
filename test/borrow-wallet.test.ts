@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { prepareOpenTrove } from "../src/borrow-action.ts";
 import { requestReviewedOpenTrove } from "../src/borrow-wallet.ts";
@@ -80,5 +80,34 @@ describe("reviewed testnet loan wallet boundary", () => {
     const wallet = new Wallet(); wallet.hash = "0x1234";
     expect((await requestReviewedOpenTrove(wallet, await prepare(), () => {}, protocol())).status).toBe("unknown");
     expect(wallet.sent).toHaveLength(1);
+  });
+  it.each(["protocol refresh", "final wallet read"])("refuses a review that expires during %s before saving or sending", async (phase) => {
+    let now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const reviewed = await prepare(); const wallet = new Wallet(); let saved = false;
+      let release!: () => void; let started!: () => void;
+      const paused = new Promise<void>((resolve) => { release = resolve; });
+      const began = new Promise<void>((resolve) => { started = resolve; });
+      const base = protocol(); let pausedProtocol = false; let chainReads = 0;
+      const request = wallet.request.bind(wallet);
+      wallet.request = async (args) => {
+        if (phase === "final wallet read" && args.method === "eth_chainId" && ++chainReads === 2) {
+          started(); await paused;
+        }
+        return request(args);
+      };
+      const pending = requestReviewedOpenTrove(wallet, reviewed, () => { saved = true; }, async (...args) => {
+        if (phase === "protocol refresh" && !pausedProtocol) { pausedProtocol = true; started(); await paused; }
+        return base(...args);
+      });
+      await began;
+      now = reviewed.expiresAt + 1;
+      // Extending the caller's object cannot extend the already bound review deadline.
+      reviewed.expiresAt = now + 60_000;
+      release();
+      await expect(pending).rejects.toThrow("expired");
+      expect(saved).toBe(false); expect(wallet.sent).toEqual([]);
+    } finally { clock.mockRestore(); }
   });
 });

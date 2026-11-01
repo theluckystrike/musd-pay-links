@@ -28,6 +28,7 @@ let context;
 let wallet;
 let app;
 let walletReady = false;
+let secretEntryStarted = false;
 let extensionId;
 let pumpRunning = false;
 let pumpError;
@@ -35,6 +36,7 @@ let confirmMode = 'none';
 let transactionRejections = 0;
 let transactionApprovals = 0;
 let signatureApprovals = 0;
+let walletPromptActions = 0;
 const acted = new WeakMap();
 const evidence = {
   startedAt: new Date().toISOString(),
@@ -98,11 +100,27 @@ async function importWallet(mnemonic, password) {
   setStage('wallet-import');
   await wallet.goto(`chrome-extension://${extensionId}/home.html#onboarding/welcome`);
   await wallet.getByTestId('onboarding-import-wallet').click();
-  if (await visible(wallet, 'onboarding-import-with-srp-button')) await wallet.getByTestId('onboarding-import-with-srp-button').click();
-  await wallet.getByTestId('srp-input-import__srp-note').waitFor({ state: 'visible' });
+  setStage('wallet-existing-login');
+  const note = wallet.getByTestId('srp-input-import__srp-note');
+  let selectedSrp = false;
+  // WelcomeLogin waits100ms before rendering login=existing options. An immediate isVisible check
+  // can miss the SRP choice and then wait forever on the next screen. Follow the rendered UI.
+  await waitFor(async () => {
+    if (await note.isVisible().catch(() => false)) return true; // Builds without social login go here directly.
+    if (selectedSrp) return false;
+    const byId = wallet.getByTestId('onboarding-import-with-srp-button');
+    // This exact accessible name comes from v13.55.0 app/_locales/en/messages.json.
+    const byName = wallet.getByRole('button', { name: 'Import using Secret Recovery Phrase', exact: true });
+    const option = await byId.isVisible().catch(() => false) ? byId : byName;
+    if (!(await option.isVisible().catch(() => false))) return false;
+    selectedSrp = true;
+    await option.click();
+    return false;
+  }, 45_000);
+  setStage('wallet-srp-entry');
   // Word-by-word entry matches MetaMask's own onboarding page object. The secret is never logged.
   const words = mnemonic.trim().split(/\s+/);
-  const note = wallet.getByTestId('srp-input-import__srp-note');
+  secretEntryStarted = true; // Set BEFORE any secret fill; a failed fill can still have entered bytes.
   await note.fill(words[0]);
   await note.press('Space');
   for (let i = 1; i < words.length; i++) {
@@ -111,10 +129,13 @@ async function importWallet(mnemonic, password) {
     if (i < words.length - 1) await input.press('Space');
   }
   await wallet.getByTestId('import-srp-confirm').click();
+  setStage('wallet-password');
+  secretEntryStarted = true;
   await wallet.getByTestId('create-password-new-input').fill(password);
   await wallet.getByTestId('create-password-confirm-input').fill(password);
   await wallet.getByTestId('create-password-terms').click();
   await wallet.getByTestId('create-password-submit').click();
+  setStage('wallet-onboarding-finish');
   await waitFor(async () => {
     if (await clickIfVisible(wallet, 'passkey-maybe-later-button')) return false;
     if (await visible(wallet, 'parent-selector-onboarding-metrics')) {
@@ -175,6 +196,7 @@ async function confirmationPump() {
         const kind = classifyConfirmation(text, url);
         if (kind === 'forbidden') throw new Error('Unexpected sensitive wallet screen');
         if (kind === 'unknown') continue; // Never blindly approve an unfamiliar screen.
+        if (confirmMode === 'feature-absence') throw new Error('A wallet prompt appeared during the missing-Web-Locks check');
         // UI progression can reuse one window. Its route/title/button text identify each reviewed step.
         const title = await page.getByTestId('confirm-title-text').innerText().catch(() => kind);
         const connectStep = kind === 'connect' && /Review permissions/i.test(text) ? 'review-permissions' : '';
@@ -208,6 +230,7 @@ async function confirmationPump() {
             if (transactionRejections !== 0) throw new Error('More than one rejection request');
             acted.set(page, key); // Save the attempt before the action, even if the window closes early.
             transactionRejections++;
+            walletPromptActions++;
             await page.getByTestId('confirm-footer-cancel-button').click();
             continue;
           }
@@ -223,6 +246,7 @@ async function confirmationPump() {
         acted.set(page, key);
         if (kind === 'signature') signatureApprovals++;
         if (kind === 'transaction') transactionApprovals++;
+        walletPromptActions++;
         await confirm.click();
       } catch (error) {
         if (!page.isClosed() && !(error?.message ?? '').includes('Target page, context or browser has been closed')) {
@@ -238,6 +262,83 @@ async function confirmationPump() {
 async function connectedAccount(expected) {
   const accounts = await app.evaluate(async () => await window.ethereum.request({ method: 'eth_requestAccounts' }));
   check('Dapp sees the expected task-only selected account', Array.isArray(accounts) && accounts[0]?.toLowerCase() === expected.toLowerCase(), { selected: Array.isArray(accounts) ? accounts[0] : null });
+}
+
+async function verifyMissingWebLocks(client, payer, payURL, memo) {
+  setStage('feature-absence-web-locks');
+  const previousMode = confirmMode;
+  confirmMode = 'feature-absence';
+  const beforeActions = { walletPromptActions, transactionRejections, transactionApprovals, signatureApprovals };
+  const nonceBefore = await client.getTransactionCount({ address: payer, blockTag: 'pending' });
+  const promptViews = [];
+  const observedPages = new Map();
+  const isPromptURL = (url) => url.startsWith(`chrome-extension://${extensionId}/`)
+    && (/\/notification\.html/.test(url) || /#\/(?:confirmation|confirm|connect)(?:\/|$)/.test(url));
+  const observe = (page) => {
+    const inspect = () => {
+      if (isPromptURL(page.url()) && promptViews.length < 10) promptViews.push({ route: new URL(page.url()).hash, observedAt: new Date().toISOString() });
+    };
+    const onNavigation = (frame) => { if (frame === page.mainFrame()) inspect(); };
+    page.on('framenavigated', onNavigation);
+    observedPages.set(page, onNavigation);
+    inspect();
+  };
+  for (const page of context.pages()) observe(page);
+  context.on('page', observe);
+  let noLocks;
+  const record = {
+    status: 'incomplete',
+    method: 'Feature-absence simulation in a real Chromium page with the real MetaMask extension.',
+    override: 'This page alone exposes navigator.locks as undefined before application code runs.',
+    nativeBrowserClaim: 'This does not claim native Chromium lacks Web Locks.',
+    nonceBefore,
+    promptViews,
+    quietObservationMs: 2_000,
+  };
+  evidence.missingWebLocks = record;
+  try {
+    check('No wallet prompt is pending before the feature-absence check', promptViews.length === 0);
+    noLocks = await context.newPage();
+    await noLocks.addInitScript(() => {
+      Object.defineProperty(navigator, 'locks', { configurable: true, value: undefined });
+    });
+    await noLocks.goto(payURL.href, { waitUntil: 'domcontentloaded' });
+    await noLocks.waitForFunction(() => Boolean(window.ethereum?.isMetaMask));
+    check('Feature-absence page retains the actual MetaMask provider', await noLocks.evaluate(() => window.ethereum.isMetaMask === true));
+    check('Feature-absence page has Web Locks hidden', await noLocks.evaluate(() => typeof navigator.locks === 'undefined'));
+    check('Original application page retains native Web Locks', await app.evaluate(() => typeof navigator.locks?.request === 'function'));
+    await waitFor(async () => !(await noLocks.locator('#pv-pay').isDisabled()), 60_000);
+    const attemptKey = `musd-sent:${CHAIN_ID}:${memo}`;
+    const storedBefore = await noLocks.evaluate((key) => localStorage.getItem(key), attemptKey);
+    await noLocks.locator('#pv-pay').click();
+    await waitFor(async () => /cannot coordinate invoice payments across tabs/i.test(await noLocks.locator('#pv-out').innerText()), 15_000);
+    record.message = await noLocks.locator('#pv-out').innerText();
+    check('Missing Web Locks stops the payment with a plain explanation', /Web Locks support/i.test(record.message) && /No payment was requested/i.test(record.message));
+    check('Missing Web Locks leaves Pay locked', await noLocks.locator('#pv-pay').isDisabled());
+    // Observe a bounded quiet window after the synchronous guard. A fault must not be approved by the pump.
+    await sleep(2_000);
+    if (pumpError) throw pumpError;
+    record.nonceAfter = await client.getTransactionCount({ address: payer, blockTag: 'pending' });
+    record.walletPromptActionDelta = walletPromptActions - beforeActions.walletPromptActions;
+    check('Feature-absence check creates no wallet prompt', promptViews.length === 0);
+    check('Feature-absence check takes no wallet approval or rejection action', walletPromptActions === beforeActions.walletPromptActions
+      && transactionRejections === beforeActions.transactionRejections
+      && transactionApprovals === beforeActions.transactionApprovals
+      && signatureApprovals === beforeActions.signatureApprovals);
+    check('Feature-absence check leaves the payer pending nonce unchanged', record.nonceAfter === nonceBefore);
+    check('Feature-absence check leaves saved payment state unchanged', await noLocks.evaluate((key) => localStorage.getItem(key), attemptKey) === storedBefore);
+    const file = 'feature-absence-web-locks.png';
+    await noLocks.screenshot({ path: join(OUT, file), fullPage: false });
+    evidence.images.push(file);
+    record.status = 'passed';
+    record.completedAt = new Date().toISOString();
+  } finally {
+    context.off('page', observe);
+    for (const [page, listener] of observedPages) page.off('framenavigated', listener);
+    if (noLocks && !noLocks.isClosed()) await noLocks.close();
+    confirmMode = previousMode;
+    if (app && !app.isClosed()) await app.bringToFront();
+  }
 }
 
 await mkdir(OUT, { recursive: true });
@@ -292,7 +393,7 @@ try {
   const profile = await mkdtemp(join(process.env.RUNNER_TEMP ?? tmpdir(), 'musd-wallet-profile-'));
   const password = `Test-only-${randomBytes(18).toString('hex')}`;
   context = await chromium.launchPersistentContext(profile, {
-    channel: 'chromium', headless: false, viewport: { width: 1440, height: 1000 },
+    channel: 'chromium', headless: false, locale: 'en-US', viewport: { width: 1440, height: 1000 },
     args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`],
   });
   context.setDefaultTimeout(15_000);
@@ -331,6 +432,7 @@ try {
   await connectedAccount(payer);
   const payURL = new URL(created.invoice.payUrl);
   check('Invoice pay page stays within the local preview', payURL.origin === new URL(ORIGIN).origin);
+  await verifyMissingWebLocks(client, payer, payURL, created.invoice.memo);
   await app.goto(payURL.href, { waitUntil: 'domcontentloaded' });
   await waitFor(async () => !(await app.locator('#pv-pay').isDisabled()), 60_000);
   await appShot('02-open-invoice');
@@ -385,7 +487,7 @@ try {
   const saved = await invoiceCheck.json();
   check('Stored invoice names this exact transaction', saved.invoice?.paid?.txHash?.toLowerCase() === hash.toLowerCase());
   evidence.finalInvoice = saved;
-  evidence.wallet.confirmations = { signatureApprovals, transactionRejections, transactionApprovals };
+  evidence.wallet.confirmations = { signatureApprovals, transactionRejections, transactionApprovals, walletPromptActions };
   await appShot('05-reloaded-paid-lock');
   pumpRunning = false;
   await pump;
@@ -398,11 +500,16 @@ try {
   if (!walletReady && wallet && !wallet.isClosed()) {
     evidence.onboardingDiagnostic = {
       route: new URL(wallet.url()).hash,
+      secretEntryStarted,
       // Identifiers and element kinds only: never text, labels or values from a recovery form.
-      elements: await wallet.locator('[data-testid]').evaluateAll((nodes) => nodes
-        .filter((node) => /^(?:parent-selector-onboarding|onboarding-|import-srp|srp-input-import|create-password|passkey-|metametrics|download-app)/.test(node.getAttribute('data-testid') ?? ''))
-        .slice(0, 70).map((node) => ({ id: node.getAttribute('data-testid'), tag: node.tagName, type: node.getAttribute('type') }))).catch(() => []),
+      elements: await wallet.locator('*').evaluateAll((nodes) => nodes.map((node) => ({
+        id: node.getAttribute('data-testid'), tag: node.tagName, type: node.getAttribute('type'), visible: node.getClientRects().length > 0,
+      }))).catch(() => []),
     };
+    if (!secretEntryStarted) {
+      const file = 'onboarding-before-secret-failure.png';
+      await wallet.screenshot({ path: join(OUT, file), fullPage: false }).then(() => evidence.images.push(file)).catch(() => {});
+    }
   }
   // Do not emit Playwright error/stack or locator call logs: onboarding calls contain secret input.
   console.error(`Browser evidence incomplete at public stage ${stage}. No raw wallet error is emitted.`);

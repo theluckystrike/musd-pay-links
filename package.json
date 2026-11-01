@@ -21,7 +21,8 @@
     "testnet-pay": "node --experimental-strip-types scripts/testnet-pay.ts",
     "testnet-borrow": "node --experimental-strip-types scripts/testnet-borrow.ts",
     "create-invoice": "node --experimental-strip-types scripts/create-invoice.ts",
-    "test:runtime": "node scripts/runtime-smoke.mjs"
+    "test:runtime": "node scripts/runtime-smoke.mjs",
+    "verify-borrow": "node --experimental-strip-types scripts/verify-borrow.ts"
   },
   "dependencies": {
     "qrcode-generator": "2.0.4",

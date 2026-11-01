@@ -197,7 +197,7 @@ function rpcEndpoints(chain: MezoChain): string[] {
  * documented endpoint when there is one. Returns null only when every try answered null. Throws when
  * no endpoint answered at all.
  */
-async function rpcNotNull<T>(chain: MezoChain, method: string, params: unknown[], fetchImpl: Fetch = fetch, tries = 6): Promise<T | null> {
+export async function rpcNotNull<T>(chain: MezoChain, method: string, params: unknown[], fetchImpl: Fetch = fetch, tries = 6): Promise<T | null> {
   const urls = rpcEndpoints(chain);
   let lastError: unknown = null;
   for (let i = 0; i < tries; i++) {

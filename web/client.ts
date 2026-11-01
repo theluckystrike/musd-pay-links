@@ -460,8 +460,14 @@ function recordSent(chainId: number, memo: string, id: string, hash: `0x${string
     // The in-page lock remains. An earlier requesting marker is retained if this later write fails.
   }
 }
-function clearReverted(chainId: number, memo: string, hash: string): boolean {
-  try { return clearFailedWalletAttempt(browserAttemptStorage, chainId, memo, hash); }
+async function clearReverted(chainId: number, memo: string, hash: string): Promise<boolean> {
+  // Every change to this marker uses the send lock. A synchronous read/remove alone is not atomic
+  // across tabs. A send preflight may already own this lock, so leave cleanup to a later check.
+  if (!navigator.locks?.request) return false;
+  try {
+    return await navigator.locks.request(`musd-pay:${chainId}:${memo}`, { mode: "exclusive", ifAvailable: true }, (lock) =>
+      lock ? clearFailedWalletAttempt(browserAttemptStorage, chainId, memo, hash) : false);
+  }
   catch { return false; }
 }
 
@@ -510,7 +516,7 @@ async function lockIfSentHere(chainId: number, memo: string, a: InvoiceAnswer): 
     const q = new URLSearchParams({ chain: String(chainId), tx: hash, to: a.invoice.to, amount: a.invoice.amount, memo, from_block: String(a.invoice.fromBlock) });
     const v = (await (await fetch(`/api/verify?${q}`)).json()) as { status?: string };
     // A missing or mismatched RPC answer does not prove that the wallet never broadcast the payment.
-    if (v.status === "failed" && clearReverted(chainId, memo, hash)) return false;
+    if (v.status === "failed" && await clearReverted(chainId, memo, hash)) return false;
     if (v.status === "paid_no_memo") {
       showReferenceMissing();
       return true;
@@ -764,9 +770,12 @@ async function followPayment(hash: string, payment: { recipient: string; amountT
       return;
     }
     if (v.status === "failed" || v.status === "mismatch") {
-      if (invoice && v.status === "failed") clearReverted(invoice.chainId, invoice.memo, hash);
-      setPayerStatus(v.status === "failed" ? "The transaction reverted. Reload the page before trying again." : "The transfer does not match the invoice. Check the transaction before any retry.");
-      status(`${esc(v.message ?? v.status)} ${link}. ${v.status === "failed" ? "The transaction reverted. Reload the page before trying again." : "Check the transaction and contact the merchant before any retry."}`);
+      const cleared = v.status === "failed" && (!invoice || await clearReverted(invoice.chainId, invoice.memo, hash));
+      const next = v.status === "failed"
+        ? cleared ? "The transaction reverted. Reload the page before trying again." : "The transaction reverted, but the saved payment request remains locked. Check this invoice again before any retry."
+        : "The transfer does not match the invoice. Check the transaction before any retry.";
+      setPayerStatus(next);
+      status(`${esc(v.message ?? v.status)} ${link}. ${next}`);
       return;
     }
     // pending, not_found, unavailable, 429: ask again
