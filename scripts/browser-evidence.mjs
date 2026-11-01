@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { chromium } from 'playwright';
-import { createPublicClient, decodeEventLog, erc20Abi, http, parseUnits, stringToHex } from 'viem';
+import { createPublicClient, decodeEventLog, encodeFunctionData, erc20Abi, http, parseUnits, stringToHex } from 'viem';
 import { mnemonicToAccount } from 'viem/accounts';
 
 const ORIGIN = process.env.MUSD_EVIDENCE_ORIGIN ?? 'http://127.0.0.1:8787';
@@ -175,7 +175,7 @@ function pendingSidepanelURL(raw) {
   try { url = new URL(raw); } catch { return null; }
   if (url.protocol !== 'chrome-extension:' || url.host !== extensionId || url.pathname !== '/sidepanel.html' || url.search) return null;
   // These are existing consent routes with one opaque request ID. Never represent other surfaces.
-  if (!/^#\/(?:connect|confirmation|confirm-transaction|confirm)\/[A-Za-z0-9_-]{4,128}$/.test(url.hash)) return null;
+  if (!/^#\/(?:(?:connect|confirmation|confirm)\/[A-Za-z0-9_-]{4,128}|confirm-transaction\/[A-Za-z0-9_-]{4,128}(?:\/signature-request)?)$/.test(url.hash)) return null;
   if (/(?:snap|onboarding|settings)/i.test(url.hash)) return null;
   return url;
 }
@@ -197,6 +197,7 @@ async function representPendingSidepanelRequests() {
   const sourceRoutes = new Set(sourceTargets.map((target) => new URL(target.url).hash));
   for (const [route, record] of sidepanelRepresentations) {
     if (record.page && !record.page.isClosed() && !sourceRoutes.has(route)
+      && !sourceRoutes.has(new URL(record.page.url()).hash)
       && [...actedRequests].some((key) => key.startsWith(`${route}|`))) {
       await record.page.close();
       record.evidence.closedAt = new Date().toISOString();
@@ -210,7 +211,20 @@ async function representPendingSidepanelRequests() {
     const route = url.hash;
     if (sidepanelRepresentations.has(route)) continue; // Never reopen/retry a represented request.
     const actualPage = context.pages().find((page) => !page.isClosed() && page.url() === target.url);
-    if (actualPage) { requestViews.set(route, actualPage); continue; }
+    if (actualPage) {
+      requestViews.set(route, actualPage);
+      const priorView = [...sidepanelRepresentations.values()].find((item) => item.page === actualPage);
+      if (priorView) {
+        check('Side-panel request representations remain bounded', sidepanelRepresentations.size < 8);
+        const publicRecord = { route, sourcePathname: url.pathname, sourceType: target.type,
+          representation: 'Existing owned consent tab naturally advanced to this exact already-pending source route',
+          reusedExistingView: true, providerRequestIssuedByRepresentation: false, controllerStateInjectedByHarness: false, observedAt: new Date().toISOString() };
+        sidepanelRepresentations.set(route, { page: actualPage, targetId: priorView.targetId, sourceTargetId: target.targetId, evidence: publicRecord });
+        evidence.wallet.pendingPromptRepresentations.push(publicRecord);
+        await checkpoint('observe-owned-consent-view-transition', { route });
+      }
+      continue;
+    }
     check('Side-panel request representations remain bounded', sidepanelRepresentations.size < 8);
     const publicRecord = { route, sourcePathname: url.pathname, sourceType: target.type,
       representation: 'One normal tab at the exact already-pending authenticated same-extension prompt URL',
@@ -565,13 +579,75 @@ async function chooseAccount(label, { create = false } = {}) {
   check(`MetaMask selected ${label}`, true);
   evidence.wallet.selectedAccount = label === 'Account 1' ? evidence.accounts.payer : evidence.accounts.merchant;
 }
-function classifyConfirmation(text, url) {
+function classifyConfirmation(text, url, title = '') {
   if (/Secret Recovery Phrase|Enter your password|unlock your wallet/i.test(text)) return 'forbidden';
-  if (/Connect this website with MetaMask|Review permissions/i.test(text) || /#\/connect(?:\/|$)/.test(url)) return 'connect';
-  if (/Signature request|Sign-in request/i.test(text)) return 'signature';
-  if (/Add Mezo Testnet|Switch to Mezo Testnet|Switch network|Switch to this network/i.test(text)) return 'network';
-  if (/Transaction request|Transaction|Send|Transfer/i.test(text) && /confirm/i.test(text)) return 'transaction';
+  const publicText = `${title}\n${text}`;
+  const signature = /Signature request|Sign-in request/i.test(publicText);
+  const connect = /Connect this website with MetaMask|Review permissions/i.test(publicText);
+  const network = /Add Mezo Testnet|Switch to Mezo Testnet|Switch network|Switch to this network/i.test(publicText);
+  const transaction = /Transaction request|Transaction|Send|Transfer/i.test(publicText) && /confirm/i.test(publicText);
+  if (/#\/connect(?:\/|$)/.test(url)) return connect && !signature ? 'connect' : signature || network || transaction ? 'transition' : 'unknown';
+  if (/\/signature-request(?:$|\?)/.test(url)) return signature && !connect ? 'signature' : connect || network || transaction ? 'transition' : 'unknown';
+  if (signature && !connect) return 'signature';
+  if (connect) return 'transition';
+  if (network) return 'network';
+  if (transaction) return 'transaction';
   return 'unknown';
+}
+function consentRoute(page) { return new URL(page.url()).hash.split('?')[0]; }
+function consentViewChanged() { return Object.assign(new Error('Consent view changed before action'), { code: 'CONSENT_VIEW_CHANGED' }); }
+function requireConsentRoute(page, route) {
+  if (page.isClosed() || consentRoute(page) !== route) throw consentViewChanged();
+}
+async function readConsentSnapshot(page) {
+  const url = page.url();
+  const text = await page.locator('body').innerText({ timeout: 1_500 });
+  const titleNode = page.getByTestId('confirm-title-text');
+  // Connect has no redesigned title node. Never wait for a future request to supply its title.
+  const title = await titleNode.isVisible().catch(() => false) ? await titleNode.innerText({ timeout: 1_000 }).catch(() => '') : '';
+  if (page.isClosed() || page.url() !== url) return null;
+  const kind = classifyConfirmation(text, url, title);
+  if (kind === 'transition') return null;
+  const route = new URL(url).hash.split('?')[0];
+  const connectStep = kind === 'connect' && /Review permissions/i.test(text) ? 'review-permissions' : '';
+  return { url, route, text, kind, title: title || kind, connectStep, identity: `${route}|${title || kind}|${kind}|${connectStep}` };
+}
+async function requireFreshConsent(page, snapshot) {
+  const fresh = await readConsentSnapshot(page);
+  if (!fresh || fresh.identity !== snapshot.identity) throw consentViewChanged();
+  return fresh;
+}
+function parseInvoiceClaim(message, expected, nowMs = Date.now()) {
+  const match = /^MUSD Pay Links, create invoice\nchain (\d+)\nto (0x[0-9a-fA-F]{40})\namount ((?:0|[1-9]\d*)(?:\.\d{1,18})?) MUSD\nreference (INV-[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{8})\ntime (\d+)$/.exec(message.trim());
+  assert(match, 'Wallet message is the exact canonical create-invoice claim');
+  const claim = { chainId: Number(match[1]), to: match[2], amount: match[3], memo: match[4], timestamp: Number(match[5]) };
+  assert(claim.chainId === CHAIN_ID && claim.to.toLowerCase() === expected.merchant.toLowerCase(), 'Wallet claim binds the task chain and merchant');
+  assert(parseUnits(claim.amount, 18) === BigInt(expected.units), 'Wallet claim binds the exact task amount');
+  assert(Number.isSafeInteger(claim.timestamp) && claim.timestamp >= Math.floor(expected.gestureStartedAt / 1_000) - 5
+    && Math.abs(nowMs / 1_000 - claim.timestamp) <= 600, 'Wallet claim has a fresh whole-second timestamp');
+  return claim;
+}
+async function reviewInvoiceClaim(page, snapshot) {
+  await requireFreshConsent(page, snapshot);
+  const message = page.locator('.confirm-info-row p').filter({ hasText: 'MUSD Pay Links, create invoice' });
+  await waitFor(async () => {
+    requireConsentRoute(page, snapshot.route);
+    const count = await message.count();
+    if (count > 1) {
+      await requireFreshConsent(page, snapshot);
+      check('Wallet exposes exactly one canonical invoice message', false);
+    }
+    return count === 1;
+  }, 15_000);
+  await requireFreshConsent(page, snapshot);
+  check('Wallet exposes exactly one canonical invoice message', await message.count() === 1);
+  const displayed = await message.innerText({ timeout: 2_000 });
+  await requireFreshConsent(page, snapshot);
+  const claim = parseInvoiceClaim(displayed, { merchant: evidence.accounts.merchant, units: evidence.funding.requiredMUSD,
+    gestureStartedAt: Date.parse(activeProductGesture?.startedAt ?? '') });
+  if (evidence.wallet.reviewedInvoiceClaim) check('A repeated signature view binds the same invoice claim', JSON.stringify(evidence.wallet.reviewedInvoiceClaim) === JSON.stringify(claim));
+  evidence.wallet.reviewedInvoiceClaim = claim;
+  check('Wallet message binds exact chain, merchant, amount, fresh reference and time', true);
 }
 async function publicButtonMetadata(page) {
   try {
@@ -591,12 +667,13 @@ async function publicButtonMetadata(page) {
     return { buttons: [], buttonDiagnosticFailure: { errorClass: errorClass(error), reason: errorReason(error) } };
   }
 }
-async function verifyWalletOrigin(page, kind) {
+async function verifyWalletOrigin(page, kind, snapshot) {
   const expected = new URL(ORIGIN);
   const diagnostic = { kind, route: new URL(page.url()).hash.split('?')[0], expectedOrigin: expected.origin, status: 'unverified' };
   evidence.wallet.originReviews ??= [];
   evidence.wallet.originReviews.push(diagnostic);
   try {
+    if (snapshot) await requireFreshConsent(page, snapshot);
     check('Origin review contains no recovery or password input', await page.locator('input[type="password"], [data-testid*="srp"], [data-testid*="password"]').count() === 0);
     const webOrigins = new Set(context.pages().flatMap((candidate) => candidate.frames().map((frame) => frame.url()))
       .filter((raw) => /^https?:\/\//.test(raw)).map((raw) => new URL(raw).origin));
@@ -610,10 +687,12 @@ async function verifyWalletOrigin(page, kind) {
       const heading = page.getByTestId('parent-selector-connect-page').locator('.break-words.whitespace-normal').first();
       const hydrationStarted = Date.now();
       await waitFor(async () => {
+        if (snapshot) requireConsentRoute(page, snapshot.route);
         diagnostic.displayedHostname = (await heading.innerText({ timeout: 2_000 }).catch((error) => {
           diagnostic.headingReadFailure = { errorClass: errorClass(error), reason: errorReason(error) };
           return '';
         })).trim().slice(0, 250);
+        if (snapshot) requireConsentRoute(page, snapshot.route);
         return diagnostic.displayedHostname !== '' && diagnostic.displayedHostname !== 'Unknown Origin';
       }, 15_000);
       diagnostic.hydrationWaitMs = Date.now() - hydrationStarted;
@@ -624,7 +703,10 @@ async function verifyWalletOrigin(page, kind) {
     } else {
       // PersonalSignInfo passes its origin to ConfirmInfoRowUrl: host:port plus HTTP badge.
       const origin = page.getByTestId('confirmation__details-origin');
-      await origin.waitFor({ state: 'visible', timeout: 15_000 });
+      await waitFor(async () => {
+        if (snapshot) requireConsentRoute(page, snapshot.route);
+        return await origin.isVisible().catch(() => false);
+      }, 15_000);
       diagnostic.displayedHostAndPort = (await origin.innerText()).trim().slice(0, 250);
       diagnostic.httpBadgeVisible = await origin.locator('..').getByText('HTTP', { exact: true }).isVisible().catch(() => false);
       diagnostic.verified = isolatedGesture && diagnostic.displayedHostAndPort === expected.host
@@ -632,18 +714,25 @@ async function verifyWalletOrigin(page, kind) {
     }
     diagnostic.status = diagnostic.verified ? 'verified-from-public-ui-and-isolated-product-context' : 'origin-mismatch';
   } catch (error) {
+    if (error?.code === 'CONSENT_VIEW_CHANGED') {
+      diagnostic.status = 'view-transitioned-during-origin-review';
+      throw error;
+    }
     diagnostic.errorClass = errorClass(error);
     diagnostic.reason = errorReason(error);
   }
+  if (snapshot) await requireFreshConsent(page, snapshot);
   await checkpoint('wallet-origin-reviewed', { kind, verified: diagnostic.verified === true });
   if (!diagnostic.verified) await publicWalletShot(page, `wallet-${kind}-origin-unverified`).catch(() => {});
   return diagnostic.verified === true;
 }
-async function selectTaskAccountPermissions(page) {
+async function selectTaskAccountPermissions(page, snapshot) {
   if (permissionReviewed.has(page) || !(await visible(page, 'account-selection-section'))) return;
   await bounded(async () => {
+    if (snapshot) await requireFreshConsent(page, snapshot);
     walletPromptActions++;
     await journalWalletAction('connect', 'open-account-permission-selection');
+    if (snapshot) requireConsentRoute(page, snapshot.route);
     if (!pumpRunning) throw new Error('Wallet review stopped');
     await page.getByTestId('account-selection-section').click();
     await page.getByTestId('edit-accounts-modal-header').waitFor({ state: 'visible' });
@@ -652,15 +741,19 @@ async function selectTaskAccountPermissions(page) {
       const row = page.locator('.multichain-account-cell').filter({ has: page.getByTestId(`multichain-account-cell-name-${label}`) });
       const checkbox = row.getByRole('checkbox');
       if (!(await checkbox.isChecked())) {
+        if (snapshot) requireConsentRoute(page, snapshot.route);
         walletPromptActions++;
         await journalWalletAction('connect', `select-permitted-${label.replaceAll(' ', '-').toLowerCase()}`);
+        if (snapshot) requireConsentRoute(page, snapshot.route);
         if (!pumpRunning) throw new Error('Wallet review stopped');
         await checkbox.check();
       }
       check(`Connect UI explicitly permits task ${label}`, await checkbox.isChecked());
     }
+    if (snapshot) requireConsentRoute(page, snapshot.route);
     walletPromptActions++;
     await journalWalletAction('connect', 'save-task-account-permissions');
+    if (snapshot) requireConsentRoute(page, snapshot.route);
     if (!pumpRunning) throw new Error('Wallet review stopped');
     await page.getByTestId('connect-more-accounts-button').click();
     await page.getByTestId('accounts-count-2').waitFor({ state: 'visible' });
@@ -695,32 +788,37 @@ async function confirmationPump() {
       let reviewKind = 'unknown';
       let actionAttempted = false;
       try {
-        const text = await page.locator('body').innerText({ timeout: 1500 });
-        const kind = classifyConfirmation(text, url);
+        const snapshot = await readConsentSnapshot(page);
+        if (!snapshot || snapshot.url !== url) {
+          evidence.wallet.transitionalViewSkips = (evidence.wallet.transitionalViewSkips ?? 0) + 1;
+          continue;
+        }
+        const { text, kind, title } = snapshot;
         reviewKind = kind;
         if (kind === 'forbidden') throw new Error('Unexpected sensitive wallet screen');
         if (kind === 'unknown') continue; // Never blindly approve an unfamiliar screen.
         if (confirmMode === 'feature-absence') throw new Error('A wallet prompt appeared during the missing-Web-Locks check');
-        // UI progression can reuse one window. Its route/title/button text identify each reviewed step.
-        const title = await page.getByTestId('confirm-title-text').innerText().catch(() => kind);
-        const connectStep = kind === 'connect' && /Review permissions/i.test(text) ? 'review-permissions' : '';
         // One logical request is acted only once per reviewed step, across side panel/tab views.
         // Mode is deliberately excluded: a previously rejected request cannot be approved later.
-        const key = `${requestRoute}|${title}|${kind}|${connectStep}`;
+        const key = snapshot.identity;
+        const buttons = await publicButtonMetadata(page);
+        await requireFreshConsent(page, snapshot);
         evidence.lastWalletScreen = {
-          route: new URL(url).hash,
+          route: snapshot.route,
           kind,
           title,
           // Only public button labels/identifiers. No input values, raw error stack or whole DOM.
-          ...await publicButtonMetadata(page),
+          ...buttons,
         };
         if (actedRequests.has(key)) continue;
         if (kind === 'connect' || kind === 'signature') {
-          check(`Wallet ${kind} belongs to the local test application`, await verifyWalletOrigin(page, kind));
+          const originVerified = await verifyWalletOrigin(page, kind, snapshot);
+          await requireFreshConsent(page, snapshot);
+          check(`Wallet ${kind} belongs to the local test application`, originVerified);
         }
-        if (kind === 'connect') await selectTaskAccountPermissions(page);
+        if (kind === 'connect') await selectTaskAccountPermissions(page, snapshot);
         if (kind === 'signature') {
-          check('Signed content names MUSD invoice creation', /MUSD Pay Links|create invoice/i.test(await page.locator('body').innerText()));
+          await reviewInvoiceClaim(page, snapshot);
         }
         if (kind === 'network') {
           check('Wallet network request is Mezo Testnet', /Mezo Testnet|31611/.test(text));
@@ -732,11 +830,18 @@ async function confirmationPump() {
           if (confirmMode === 'reject-once') {
             if (!pumpRunning || Date.now() >= DEADLINE) return;
             if (transactionRejections !== 0) throw new Error('More than one rejection request');
+            await requireFreshConsent(page, snapshot);
             actedRequests.add(key); // Save the attempt before the action, even if the window closes early.
             transactionRejections++;
             walletPromptActions++;
             await journalWalletAction(kind, 'reject');
             if (!pumpRunning || Date.now() >= DEADLINE) return;
+            try { await requireFreshConsent(page, snapshot); }
+            catch {
+              Object.assign(evidence.walletActionJournal.at(-1), { clickIssued: false, skipReason: 'consent-view-changed-after-journal' });
+              await persistEvidence();
+              throw new Error('Wallet view changed after rejection journal; click was not issued');
+            }
             actionAttempted = true;
             await page.getByTestId('confirm-footer-cancel-button').click();
             continue;
@@ -751,15 +856,28 @@ async function confirmationPump() {
           : page.getByTestId('confirm-footer-button');
         if (!(await confirm.isVisible().catch(() => false)) || await confirm.isDisabled()) continue;
         if (!pumpRunning || Date.now() >= DEADLINE) return;
+        await requireFreshConsent(page, snapshot);
+        if (kind === 'signature' && signatureApprovals !== 0) throw new Error('A second invoice signature approval is forbidden');
         actedRequests.add(key);
         if (kind === 'signature') signatureApprovals++;
         if (kind === 'transaction') transactionApprovals++;
         walletPromptActions++;
         await journalWalletAction(kind, 'approve');
         if (!pumpRunning || Date.now() >= DEADLINE) return;
+        try { await requireFreshConsent(page, snapshot); }
+        catch {
+          Object.assign(evidence.walletActionJournal.at(-1), { clickIssued: false, skipReason: 'consent-view-changed-after-journal' });
+          await persistEvidence();
+          throw new Error('Wallet view changed after approval journal; click was not issued');
+        }
         actionAttempted = true;
         await confirm.click();
       } catch (error) {
+        if (error?.code === 'CONSENT_VIEW_CHANGED') {
+          evidence.wallet.transitionalViewSkips = (evidence.wallet.transitionalViewSkips ?? 0) + 1;
+          await checkpoint('skip-transitional-consent-view', { reviewKind });
+          continue;
+        }
         const reason = errorReason(error);
         // A reviewed popup may close during its journaled action. Keep earlier substantive failures
         // even if the target then closes; never replace their safe class/reason with a closure error.
@@ -951,6 +1069,7 @@ try {
   const created = await createdResponse.json();
   check('Invoice was created by the normal merchant UI', createdResponse.status() === 201 && created.ok === true && created.invoice?.signed === true);
   check('Invoice binds expected testnet recipient and amount', created.invoice.chainId === CHAIN_ID && created.invoice.to.toLowerCase() === merchant.toLowerCase() && created.invoice.units === amount.toString());
+  check('Saved invoice uses the exact reference reviewed in the wallet', created.invoice.memo === evidence.wallet.reviewedInvoiceClaim?.memo);
   check('MetaMask approved one invoice signature', signatureApprovals === 1);
   evidence.invoice = created.invoice;
   await connectedAccount(merchant); // Read-only observation after the product's normal connection/signature.
@@ -1005,22 +1124,30 @@ try {
   await setStage('verify-on-chain');
   const receipt = await client.waitForTransactionReceipt({ hash, confirmations: 5, timeout: 150_000, pollingInterval: 2_000 });
   const transaction = await client.getTransaction({ hash });
+  const canonicalBlock = await client.getBlock({ blockNumber: receipt.blockNumber });
   check('Receipt succeeded on testnet', receipt.status === 'success' && await client.getChainId() === CHAIN_ID);
+  check('Transaction and receipt hashes bind the requested payment', transaction.hash.toLowerCase() === hash.toLowerCase() && receipt.transactionHash.toLowerCase() === hash.toLowerCase());
+  check('Transaction and receipt share the canonical block', transaction.blockNumber === receipt.blockNumber
+    && transaction.blockHash?.toLowerCase() === receipt.blockHash.toLowerCase()
+    && canonicalBlock.hash?.toLowerCase() === receipt.blockHash.toLowerCase());
   check('Actual transaction binds payer and MUSD contract', transaction.from.toLowerCase() === payer.toLowerCase() && transaction.to?.toLowerCase() === TOKEN.toLowerCase());
+  check('Actual transaction sends zero native value at the observed payer nonce', transaction.value === 0n && transaction.nonce === preNonce);
   const referenceHex = stringToHex(created.invoice.memo).slice(2).toLowerCase();
-  check('Wallet retained the invoice reference bytes', transaction.input.toLowerCase().endsWith(referenceHex));
+  const expectedTransferData = encodeFunctionData({ abi: erc20Abi, functionName: 'transfer', args: [merchant, amount] }).toLowerCase() + referenceHex;
+  check('Wallet retained the exact MUSD transfer calldata and invoice reference', transaction.input.toLowerCase() === expectedTransferData);
   let received = 0n;
   for (const log of receipt.logs) {
     if (log.address.toLowerCase() !== TOKEN.toLowerCase()) continue;
     try {
       const decoded = decodeEventLog({ abi: erc20Abi, data: log.data, topics: log.topics });
-      if (decoded.eventName === 'Transfer' && decoded.args.to.toLowerCase() === merchant.toLowerCase()) received += decoded.args.value;
+      if (decoded.eventName === 'Transfer' && decoded.args.from.toLowerCase() === payer.toLowerCase()
+        && decoded.args.to.toLowerCase() === merchant.toLowerCase()) received += decoded.args.value;
     } catch { /* Other token events do not prove this payment. */ }
   }
-  check('MUSD Transfer events pay the actual invoice amount', received === amount, { received: received.toString(), required: amount.toString() });
+  check('MUSD Transfer events bind payer, recipient and exact invoice amount', received === amount, { received: received.toString(), required: amount.toString() });
   const head = await client.getBlockNumber();
   check('Payment has at least five confirmations', head - receipt.blockNumber + 1n >= 5n);
-  evidence.payment = { ...evidence.payment, block: receipt.blockNumber.toString(), blockHash: receipt.blockHash, receiptStatus: receipt.status, transactionNonce: transaction.nonce, confirmations: (head - receipt.blockNumber + 1n).toString(), gasUsed: receipt.gasUsed.toString(), received: received.toString(), explorer: `https://explorer.test.mezo.org/tx/${hash}` };
+  evidence.payment = { ...evidence.payment, block: receipt.blockNumber.toString(), blockHash: receipt.blockHash, canonicalBlockHash: canonicalBlock.hash, receiptStatus: receipt.status, transactionNonce: transaction.nonce, confirmations: (head - receipt.blockNumber + 1n).toString(), gasUsed: receipt.gasUsed.toString(), received: received.toString(), exactCalldataMatched: true, nativeValue: transaction.value.toString(), explorer: `https://explorer.test.mezo.org/tx/${hash}` };
   evidence.paymentDispatch = 'exact invoice payment verified on chain';
   await setStage('verify-invoice-ui');
   await app.locator('#pv-check').click();
