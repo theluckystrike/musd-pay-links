@@ -54,12 +54,14 @@ const evidence = {
   token: TOKEN,
   origin: ORIGIN,
   applicationEnvironment: 'Isolated local Wrangler with real public Mezo Testnet RPC',
-  wallet: { product: 'MetaMask', expectedVersion: EXTENSION_VERSION, providerInjectedByHarness: false },
+  wallet: { product: 'MetaMask', expectedVersion: EXTENSION_VERSION, providerInjectedByHarness: false,
+    consentViewCleanupPolicy: 'Owned consent tabs remain open until context teardown, with at most eight logical request representations; no intermediate automatic close.' },
   checks: [],
   images: [],
   walletActionJournal: [],
   providerRequests: [],
   extensionPageErrors: [],
+  walletRpcDiagnostics: [],
   limits: [
     'Both accounts and all funds are project-owned testnet test data.',
     'This is a local preview, not proof of a production deployment or outside adoption.',
@@ -152,7 +154,7 @@ function errorReason(error) {
 }
 async function persistEvidence() {
   evidence.wallet.confirmations = { signatureApprovals, transactionRejections, transactionApprovals, walletPromptActions, countsAreActionAttempts: true };
-  if (transactionApprovals > 0 && !evidence.payment?.hash) evidence.paymentDispatch = 'unknown: approval attempted; hash not observed; no automatic resend';
+  if (paymentNeedsReconciliation()) evidence.paymentDispatch = 'unknown: approval attempt or product wallet-result uncertainty; hash not observed; no automatic resend';
   // Commit the public snapshot before any wallet action. No secret fields enter evidence.
   const snapshot = JSON.stringify(evidence, null, 2) + '\n';
   evidenceWrite = evidenceWrite.catch(() => {}).then(async () => {
@@ -194,16 +196,8 @@ async function representPendingSidepanelRequests() {
   const representedTargetIds = new Set([...sidepanelRepresentations.values()].map((record) => record.targetId).filter(Boolean));
   // Filter out our own normal tabs: Target.getTargets also reports those as sidepanel.html pages.
   const sourceTargets = targets.filter((target) => !representedTargetIds.has(target.targetId));
-  const sourceRoutes = new Set(sourceTargets.map((target) => new URL(target.url).hash));
-  for (const [route, record] of sidepanelRepresentations) {
-    if (record.page && !record.page.isClosed() && !sourceRoutes.has(route)
-      && !sourceRoutes.has(new URL(record.page.url()).hash)
-      && [...actedRequests].some((key) => key.startsWith(`${route}|`))) {
-      await record.page.close();
-      record.evidence.closedAt = new Date().toISOString();
-      record.evidence.closedBecause = 'Source side panel left the acted request route';
-    }
-  }
+  // Keep owned consent views until context teardown. Leaving one normal request can immediately
+  // start another; closing its UI between those steps may disturb that ongoing product gesture.
   if (confirmMode === 'feature-absence' && sourceTargets.length) throw new Error('Wallet prompt appeared during feature-absence check');
   if (!pumpRunning || !walletReady || !['create-signed-invoice', 'reject-one-payment', 'send-one-payment'].includes(stage)) return;
   for (const target of sourceTargets) {
@@ -315,12 +309,113 @@ function observePageErrors(page) {
     }
   });
 }
+function classifyWalletRpcConsole(raw) {
+  // Only constant categories, whitelisted codes/methods leave this function. Raw console text is
+  // transient: never serialize console arguments, messages, stack, payloads or URLs.
+  const text = typeof raw === 'string' ? raw.slice(0, 16_384) : '';
+  const allowedCodes = new Set([4001, 4100, 4200, 4900, 4901, 4902, -32700, -32600, -32601, -32602, -32603, -32000, -32001, -32002, -32003, -32004, -32005]);
+  const codes = [...text.matchAll(/\bcode\b["'\s:=]+(-?\d{3,6})(?=\D|$)/g)].map((match) => Number(match[1])).filter((code) => allowedCodes.has(code));
+  const methods = ['eth_sendTransaction', 'eth_sendRawTransaction', 'eth_requestAccounts', 'wallet_addEthereumChain', 'wallet_switchEthereumChain', 'personal_sign', 'eth_estimateGas', 'eth_gasPrice', 'eth_getTransactionCount', 'eth_chainId', 'eth_accounts', 'eth_feeHistory', 'eth_maxPriorityFeePerGas'];
+  const method = methods.find((candidate) => new RegExp(`\\b${candidate}\\b`).test(text));
+  let category;
+  if (/read.only|readonly|cannot assign|not extensible|non.extensible|cannot define property|frozen/i.test(text)) category = 'immutable-input-error';
+  else if (codes.includes(4100) || /unauthorized|not authorized|not been authorized/i.test(text)) category = 'provider-unauthorized';
+  else if (codes.includes(-32002) || /request.*already.*pending|already processing.*request/i.test(text)) category = 'wallet-request-already-pending';
+  else if (/network.?client.*(?:unknown|not found|does not exist|invalid)|unknown network.?client/i.test(text)) category = 'unknown-network-client';
+  else if (codes.includes(4902) || /unrecognized chain|unknown chain|unsupported chain|chain.*not supported|chain.*not.*added/i.test(text)) category = 'unsupported-or-unadded-chain';
+  else if (/insufficient funds|insufficient balance/i.test(text)) category = 'insufficient-funds';
+  else if (/execution reverted|transaction.*revert/i.test(text)) category = 'execution-reverted';
+  else if (/user rejected|user denied/i.test(text) || codes.includes(4001)) category = 'user-rejected';
+  else if (/rate.limit|too many requests|quota exceeded/i.test(text)) category = 'rpc-rate-limited';
+  else if (/unsupported|not supported|method.*not found/i.test(text)) category = 'unsupported-rpc-method';
+  else if (codes.includes(-32602) || /invalid params|invalid argument|invalid transaction/i.test(text)) category = 'invalid-rpc-parameters';
+  else if (/nonce/i.test(text) && /error|invalid|low|high|replacement/i.test(text)) category = 'nonce-error';
+  else if (/gas|fee/i.test(text) && /error|estimate|invalid|low|high/i.test(text)) category = 'gas-or-fee-error';
+  else if (/lavamoat|scuttl|globalthis.*inaccessible/i.test(text)) category = 'global-intrinsics-restricted';
+  else if (/timeout|timed out|failed to fetch|fetch failed|disconnected|network error/i.test(text)) category = 'rpc-transport-error';
+  else if (/internal.*(?:rpc|error)|rpc.*error/i.test(text) || codes.includes(-32603)) category = 'internal-or-unclassified-rpc-error';
+  if (!category && !codes.length) return null;
+  return { category: category ?? 'whitelisted-rpc-code', codes: [...new Set(codes)], ...(method ? { method } : {}) };
+}
+function observeWalletConsole(message) {
+  if (!walletReady || !['error', 'warning'].includes(message.type())) return;
+  const page = message.page();
+  const worker = message.worker?.();
+  let source;
+  if (worker?.url().startsWith(`chrome-extension://${extensionId}/`)) source = 'wallet-worker';
+  else if (page && isExtensionPage(page)) source = 'wallet-extension';
+  else if (page && /^https?:\/\//.test(page.url()) && new URL(page.url()).origin === new URL(ORIGIN).origin) source = 'application';
+  if (!source) return;
+  const classified = classifyWalletRpcConsole(message.text());
+  if (!classified) return;
+  const key = JSON.stringify({ source, stage, ...classified });
+  const previous = evidence.walletRpcDiagnostics.find((item) => item.key === key);
+  if (previous) { previous.count++; previous.lastAt = new Date().toISOString(); }
+  else if (evidence.walletRpcDiagnostics.length < 40) evidence.walletRpcDiagnostics.push({ key, source, stage, ...classified,
+    gesture: activeProductGesture?.kind ?? null, count: 1, at: new Date().toISOString(), limit: 'Console observation only; not proof of request dispatch or failure.' });
+  void persistEvidence().catch(() => {});
+}
+function publicBrowserAttempt(key) {
+  const raw = localStorage.getItem(key);
+  if (raw === null) return { status: 'absent' };
+  const legacy = /^(0x[0-9a-fA-F]{64})(?:\||$)/.exec(raw);
+  if (legacy) return { status: 'sent', hash: legacy[1] };
+  try {
+    const value = JSON.parse(raw);
+    if (!['requesting', 'unknown', 'sent'].includes(value?.status)) return { status: 'unreadable' };
+    const result = { status: value.status };
+    if (Number.isSafeInteger(value.at) && value.at >= 0) result.at = value.at;
+    if (typeof value.from === 'string' && /^0x[0-9a-fA-F]{40}$/.test(value.from)) result.from = value.from;
+    if (value.status === 'sent' && typeof value.hash === 'string' && /^0x[0-9a-fA-F]{64}$/.test(value.hash)) result.hash = value.hash;
+    return result;
+  } catch { return { status: 'unreadable' }; }
+}
+function paymentNeedsReconciliation() {
+  return !evidence.payment?.hash && (transactionApprovals > 0 || evidence.publicPaymentState?.uncertain === true);
+}
+async function capturePublicPaymentState() {
+  if (!app || app.isClosed() || !evidence.invoice || new URL(app.url()).origin !== new URL(ORIGIN).origin) return;
+  try {
+    const state = await bounded(async () => {
+      const status = (await app.locator('#pv-status').innerText({ timeout: 2_000 }).catch(() => '')).slice(0, 2_000);
+      const message = (await app.locator('#pv-out').innerText({ timeout: 2_000 }).catch(() => '')).slice(0, 2_000);
+      const attempt = await app.evaluate(publicBrowserAttempt, `musd-sent:${CHAIN_ID}:${evidence.invoice.memo}`);
+      const payDisabled = await app.locator('#pv-pay').isDisabled().catch(() => null);
+      return { observedAt: new Date().toISOString(), status, message, payDisabled, attempt,
+        uncertain: ['requesting', 'unknown', 'sent'].includes(attempt.status)
+          || /did not confirm whether|result is uncertain|do not pay again until|check wallet activity before any retry/i.test(`${status}\n${message}`) };
+    }, 5_000);
+    evidence.publicPaymentState = state;
+    await checkpoint('public-payment-state-observed', { uncertain: state.uncertain, attemptStatus: state.attempt.status });
+  } catch (error) { evidence.publicPaymentStateFailure = { errorClass: errorClass(error), reason: errorReason(error) }; }
+}
+async function failIfPaymentUnknown() {
+  const status = await app.locator('#pv-status').innerText({ timeout: 2_000 }).catch(() => '');
+  if (/did not confirm whether|result is uncertain|check wallet activity before any retry/i.test(status)) {
+    pumpRunning = false;
+    await capturePublicPaymentState();
+    throw new Error('Application reports an uncertain wallet result; automatic retry forbidden');
+  }
+}
+async function paymentBaseline(client, payer, purpose) {
+  const [pendingNonce, block, nativeBalance, tokenBalance] = await Promise.all([
+    client.getTransactionCount({ address: payer, blockTag: 'pending' }), client.getBlockNumber(), client.getBalance({ address: payer }),
+    client.readContract({ address: TOKEN, abi: erc20Abi, functionName: 'balanceOf', args: [payer] }),
+  ]);
+  const baseline = { at: new Date().toISOString(), purpose, pendingNonce, block: block.toString(), nativeBalance: nativeBalance.toString(), musdBalance: tokenBalance.toString(), invoiceReference: evidence.invoice.memo };
+  evidence.prePayment = baseline;
+  evidence.paymentBaselines ??= [];
+  evidence.paymentBaselines.push(baseline);
+  await checkpoint('read-only-payment-baseline-saved', { purpose });
+  return baseline;
+}
 async function reconcileUnknownPayment() {
   // Read-only observations cannot establish that a delayed wallet request was never dispatched.
   const before = evidence.prePayment;
   const record = { status: 'unknown-requires-manual-chain-review', automaticResendPermitted: false, observedAt: new Date().toISOString() };
   evidence.unknownPaymentReconciliation = record;
-  if (!before || !evidence.accounts) return;
+  if (!evidence.accounts) return;
+  record.baseline = before ?? null;
   const client = createPublicClient({ transport: http(RPC, { timeout: 4_000, retryCount: 0 }) });
   const { payer, merchant } = evidence.accounts;
   const readings = await Promise.allSettled([
@@ -336,7 +431,9 @@ async function reconcileUnknownPayment() {
   }
   if (readings[4].status !== 'fulfilled') return;
   const head = readings[4].value;
-  const start = BigInt(before.block);
+  const startValue = before?.block ?? evidence.invoice?.fromBlock;
+  if (startValue === undefined) { record.transferSearch = { status: 'no-baseline-block-available' }; return; }
+  const start = BigInt(startValue);
   const fromBlock = head > 255n && start < head - 255n ? head - 255n : start;
   record.transferSearch = { fromBlock: fromBlock.toString(), toBlock: head.toString(), boundedTo256Blocks: true };
   try {
@@ -1033,6 +1130,7 @@ try {
     args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`],
   });
   context.setDefaultTimeout(15_000);
+  context.on('console', observeWalletConsole);
   context.on('page', observePageErrors);
   for (const page of context.pages()) observePageErrors(page);
   let [worker] = context.serviceWorkers();
@@ -1084,7 +1182,7 @@ try {
   await app.goto(payURL.href, { waitUntil: 'domcontentloaded' });
   await waitFor(async () => !(await app.locator('#pv-pay').isDisabled()), 60_000);
   await appShot('02-open-invoice');
-  const nonceBefore = await client.getTransactionCount({ address: payer, blockTag: 'pending' });
+  const nonceBefore = (await paymentBaseline(client, payer, 'rejection-test')).pendingNonce;
   await setStage('reject-one-payment');
   confirmMode = 'reject-once';
   await app.bringToFront();
@@ -1092,7 +1190,10 @@ try {
   await beginProductGesture('pay-rejection-check');
   await checkpoint('rejected-payment-ui-request');
   await app.locator('#pv-pay').click();
-  await waitFor(async () => transactionRejections === 1 && /rejected/i.test(await app.locator('#pv-out').innerText()), 90_000);
+  await waitFor(async () => {
+    await failIfPaymentUnknown();
+    return transactionRejections === 1 && /rejected/i.test(await app.locator('#pv-out').innerText());
+  }, 90_000);
   check('Explicit wallet rejection leaves no project transaction', await client.getTransactionCount({ address: payer, blockTag: 'pending' }) === nonceBefore);
   await endProductGesture('payment-explicitly-rejected');
   await waitFor(async () => !(await app.locator('#pv-pay').isDisabled()));
@@ -1100,19 +1201,14 @@ try {
   check('Client selected Mezo Testnet before a payment request', Number(evidence.wallet.chainAfterConnection) === CHAIN_ID);
   await appShot('03-wallet-rejected');
   await setStage('send-one-payment');
-  const [preNonce, preBlock, preNative, preToken] = await Promise.all([
-    client.getTransactionCount({ address: payer, blockTag: 'pending' }), client.getBlockNumber(),
-    client.getBalance({ address: payer }),
-    client.readContract({ address: TOKEN, abi: erc20Abi, functionName: 'balanceOf', args: [payer] }),
-  ]);
-  evidence.prePayment = { at: new Date().toISOString(), pendingNonce: preNonce, block: preBlock.toString(), nativeBalance: preNative.toString(), musdBalance: preToken.toString(), invoiceReference: created.invoice.memo };
-  await persistEvidence();
+  const preNonce = (await paymentBaseline(client, payer, 'single-payment')).pendingNonce;
   confirmMode = 'pay-once';
   await app.bringToFront();
   await beginProductGesture('pay-invoice');
   await checkpoint('payment-ui-request');
   await app.locator('#pv-pay').click();
   const hash = await waitFor(async () => {
+    await failIfPaymentUnknown();
     const hrefs = await app.locator('#pv-out a[href]').evaluateAll((links) => links.map((a) => a.href));
     return hrefs.map((href) => /\/tx\/(0x[0-9a-fA-F]{64})/.exec(href)?.[1]).find(Boolean);
   }, 120_000);
@@ -1173,6 +1269,7 @@ try {
   evidence.failedAt = new Date().toISOString();
   evidence.failure = { stage, type: errorClass(error), reason: errorReason(error) };
   await checkpoint('harness-step-failed', { reason: evidence.failure.reason });
+  if (walletReady) await capturePublicPaymentState();
   if (!walletReady && wallet && !wallet.isClosed()) {
     evidence.onboardingDiagnostic = {
       ...await pageMetadata(wallet),
@@ -1198,7 +1295,7 @@ try {
     if (wallet && !wallet.isClosed()) await recordExtensionTargets('failure');
     evidence.extensionPages = await Promise.all(context.pages().filter(isExtensionPage).map(pageMetadata));
   }
-  if (transactionApprovals > 0 && !evidence.payment?.hash) {
+  if (paymentNeedsReconciliation()) {
     await reconcileUnknownPayment().catch((error) => {
       evidence.unknownPaymentReconciliation = { status: 'unknown-requires-manual-chain-review', automaticResendPermitted: false, errorClass: errorClass(error) };
     });
