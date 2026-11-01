@@ -208,6 +208,35 @@ describe("verifyPayment", () => {
     };
     expect(await verifyPayment(MEZO_TESTNET, { txHash: "0x12", recipient: SHOP, amount: 1n }, f)).toMatchObject({ status: "not_found" });
   });
+
+  it.each([null, "not-a-block", "0x", "0x00", "0x20000000000000"])("does not claim payment depth from an invalid head %s", async (head) => {
+    const f = mockRpc({
+      ...base,
+      eth_blockNumber: () => head,
+      eth_getTransactionReceipt: () => receipt([{ address: MEZO_TESTNET.musd, to: SHOP, value: 5n }]),
+    });
+    expect(await verifyPayment(MEZO_TESTNET, { txHash: HASH, recipient: SHOP, amount: 5n }, f))
+      .toEqual({ status: "unavailable", message: NETWORK_UNAVAILABLE_MESSAGE });
+  });
+
+  it("does not invent a confirmation when the receipt is ahead of the observed head", async () => {
+    const f = mockRpc({
+      ...base,
+      eth_blockNumber: () => "0x63",
+      eth_getTransactionReceipt: () => receipt([{ address: MEZO_TESTNET.musd, to: SHOP, value: 5n }]),
+    });
+    expect(await verifyPayment(MEZO_TESTNET, { txHash: HASH, recipient: SHOP, amount: 5n }, f))
+      .toEqual({ status: "unavailable", message: NETWORK_UNAVAILABLE_MESSAGE });
+  });
+
+  it("does not accept a receipt with a malformed block height", async () => {
+    const f = mockRpc({
+      ...base,
+      eth_getTransactionReceipt: () => ({ ...receipt([{ address: MEZO_TESTNET.musd, to: SHOP, value: 5n }]), blockNumber: "NaN" }),
+    });
+    expect(await verifyPayment(MEZO_TESTNET, { txHash: HASH, recipient: SHOP, amount: 5n }, f))
+      .toEqual({ status: "unavailable", message: NETWORK_UNAVAILABLE_MESSAGE });
+  });
 });
 
 describe("memoFromInput", () => {
@@ -398,6 +427,22 @@ describe("findPayments", () => {
     };
     const r = await findPayments(MEZO_TESTNET, { recipient: SHOP, memo: "INV-7", amount: 5n }, f);
     expect(r.status === "ok" && r.paid?.txHash).toBe(h(1));
+  });
+
+  it("does not classify a known overpayment as unrelated when its transaction stays unavailable", async () => {
+    // The unread transaction may carry INV-7. Its larger amount does not qualify for the exact-
+    // amount possible-match warning, so treating the missing input as an absent memo would unlock Pay.
+    const calls: { method: string; params: unknown[] }[] = [];
+    const f = inbox([{ tx: h(1), block: HEAD - 1, value: 6n }], {}, calls);
+    const r = await findPayments(MEZO_TESTNET, { recipient: SHOP, memo: "INV-7", amount: 5n }, f);
+    expect(r).toMatchObject({ status: "unavailable", message: NETWORK_UNAVAILABLE_MESSAGE });
+    expect(calls.filter((c) => c.method === "eth_getTransactionByHash")).toHaveLength(3);
+  });
+
+  it("does not call a duplicate scan complete while a transfer input is unreadable", async () => {
+    const f = inbox([{ tx: h(2), block: HEAD - 1, value: 6n }], {});
+    expect(await findDuplicatePayments(MEZO_TESTNET, { recipient: SHOP, memo: "INV-7", paidBlock: HEAD - 10, paidTxHash: h(1) }, f))
+      .toEqual({ checked: false, duplicates: [], fromBlock: null });
   });
 
   it("lists further payments with the same reference as duplicates, newest first, without the recorded one", async () => {

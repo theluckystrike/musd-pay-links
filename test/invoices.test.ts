@@ -130,6 +130,24 @@ describe("invoices", () => {
     expect(c.status).toBe("open");
     if (c.status === "open") expect(c.inbox.payments[0]!.possible).toBe(true);
   });
+
+  it("keeps Pay locked when an on-chain overpayment cannot yet be read in full", async () => {
+    const kv = memKV();
+    const r = await createInvoice(kv, MEZO_TESTNET, { to: SHOP, amount: "5", memo: "INV-UNKNOWN" }, HEAD - 100);
+    if (!r.ok) throw new Error("expected ok");
+    const base = chainWith([{ tx: h(60), block: HEAD - 5, units: 6n * E, memo: "INV-UNKNOWN" }]);
+    const f: Fetch = async (url, init) => {
+      const req = JSON.parse(String(init!.body));
+      if (Array.isArray(req) && req.every((q: { method: string }) => q.method === "eth_getTransactionByHash")) {
+        return new Response(JSON.stringify(req.map((q: { id: number }) => ({ jsonrpc: "2.0", id: q.id, result: null }))));
+      }
+      return base(url, init);
+    };
+    const checked = await checkInvoice(kv, MEZO_TESTNET, r.invoice, f);
+    expect(checked.status).toBe("unavailable");
+    expect(payPageLock({ invoice: r.invoice, status: checked.status, checked: true })).toBe("unavailable");
+    expect((await getInvoice(kv, MEZO_TESTNET.id, r.invoice.memo))!.paid).toBeUndefined();
+  });
 });
 
 describe("confirmation depth", () => {

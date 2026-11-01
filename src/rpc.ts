@@ -49,10 +49,20 @@ export async function rpc<T>(chain: MezoChain, method: string, params: unknown[]
 }
 
 /** eth_call against any contract on the chain. Read only. */
-export async function ethCall(chain: MezoChain, to: string, data: `0x${string}`, fetchImpl?: Fetch, from?: string): Promise<`0x${string}`> {
+export async function ethCall(chain: MezoChain, to: string, data: `0x${string}`, fetchImpl?: Fetch, from?: string, blockTag = "latest"): Promise<`0x${string}`> {
   const tx: Record<string, string> = { to, data };
   if (from) tx.from = from;
-  return rpc<`0x${string}`>(chain, "eth_call", [tx, "latest"], fetchImpl);
+  return rpc<`0x${string}`>(chain, "eth_call", [tx, blockTag], fetchImpl);
+}
+
+/** A block height must be a complete RPC quantity, not NaN, a fraction or a rounded integer. */
+function blockNumber(value: unknown): number {
+  if (typeof value !== "string" || !/^0x(?:0|[1-9a-fA-F][0-9a-fA-F]*)$/.test(value)) {
+    throw new Error("RPC returned an invalid block height");
+  }
+  const parsed = BigInt(value);
+  if (parsed > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("RPC block height exceeds the supported range");
+  return Number(parsed);
 }
 
 function call(chain: MezoChain, data: `0x${string}`, fetchImpl?: Fetch, from?: string): Promise<`0x${string}`> {
@@ -85,7 +95,7 @@ export async function readTokenInfo(chain: MezoChain, fetchImpl?: Fetch): Promis
     symbol: decodeFunctionResult({ abi: erc20Abi, functionName: "symbol", data: symbol! as `0x${string}` }),
     decimals: decodeFunctionResult({ abi: erc20Abi, functionName: "decimals", data: decimals! as `0x${string}` }),
     totalSupply: formatAmount(decodeFunctionResult({ abi: erc20Abi, functionName: "totalSupply", data: supply! as `0x${string}` })),
-    block: Number(block),
+    block: blockNumber(block),
   };
 }
 
@@ -179,10 +189,20 @@ export async function verifyPayment(chain: MezoChain, input: VerifyInput, fetchI
   if (!tx) return { status: "not_found", message: `No transaction ${input.txHash} on ${chain.name}.` };
   if (!receipt) return { status: "pending", message: "The transaction is not mined yet." };
   if (receipt.status !== "0x1") return { status: "failed", message: "The transaction reverted." };
-  if (input.fromBlock != null && Number(receipt.blockNumber) < input.fromBlock) {
+  let block: number;
+  let head: number;
+  try {
+    block = blockNumber(receipt.blockNumber);
+    head = blockNumber(headRaw);
+    // Independent public nodes can disagree while one is catching up. They do not establish finality.
+    if (block > head) throw new Error("Receipt is ahead of the reported chain head");
+  } catch {
+    return { status: "unavailable", message: NETWORK_UNAVAILABLE_MESSAGE };
+  }
+  if (input.fromBlock != null && block < input.fromBlock) {
     return {
       status: "mismatch",
-      message: `This transaction was mined in block ${Number(receipt.blockNumber)}, before the invoice was created in block ${input.fromBlock}. An older payment cannot pay a new invoice.`,
+      message: `This transaction was mined in block ${block}, before the invoice was created in block ${input.fromBlock}. An older payment cannot pay a new invoice.`,
     };
   }
   const want = "0x" + input.recipient.toLowerCase().slice(2).padStart(64, "0");
@@ -198,9 +218,7 @@ export async function verifyPayment(chain: MezoChain, input: VerifyInput, fetchI
       message: `MUSD received by the recipient in this transaction is ${formatAmount(paid)}, expected ${formatAmount(input.amount)}.`,
     };
   }
-  const block = Number(receipt.blockNumber);
-  const head = headRaw ? Number(headRaw) : block;
-  const confirmations = Math.max(1, head - block + 1);
+  const confirmations = head - block + 1;
   const from = receipt.from && /^0x[0-9a-fA-F]{40}$/.test(receipt.from) ? getAddress(receipt.from) : undefined;
   const direct = tx.to?.toLowerCase() === chain.musd.toLowerCase();
   const txMemo = direct ? memoFromInput(tx.input) : null;
@@ -337,9 +355,10 @@ interface Log { transactionHash: string; blockNumber: string; topics: string[]; 
 export async function findPayments(chain: MezoChain, input: FindInput, fetchImpl?: Fetch): Promise<FindResult> {
   const topic = "0x" + input.recipient.toLowerCase().slice(2).padStart(64, "0");
   try {
-    const head = Number(await rpc<string>(chain, "eth_blockNumber", [], fetchImpl));
+    const head = blockNumber(await rpc<string>(chain, "eth_blockNumber", [], fetchImpl));
     const floor = Math.max(0, head - MAX_LOOKBACK);
     const wanted = input.fromBlock ?? floor;
+    if (!Number.isSafeInteger(wanted) || wanted < 0) throw new Error("Payment search requires a valid start block");
     const start = Math.min(head, Math.max(floor, wanted));
     const ranges: [number, number][] = [];
     for (let to = head; to >= start; to -= LOG_CHUNK) ranges.push([Math.max(start, to - LOG_CHUNK + 1), to]);
@@ -357,13 +376,19 @@ export async function findPayments(chain: MezoChain, input: FindInput, fetchImpl
     const byTx = new Map<string, { block: number; from: string; units: bigint }>();
     let truncated = false;
     for (const log of logs) {
+      const block = blockNumber(log.blockNumber);
+      if (block < start || block > head) throw new Error("RPC log falls outside the requested block range");
       const hit = byTx.get(log.transactionHash);
       if (hit) hit.units += BigInt(log.data);
-      else if (byTx.size < MAX_TX_READS) byTx.set(log.transactionHash, { block: Number(log.blockNumber), from: getAddress("0x" + log.topics[1]!.slice(26)), units: BigInt(log.data) });
+      else if (byTx.size < MAX_TX_READS) byTx.set(log.transactionHash, { block, from: getAddress("0x" + log.topics[1]!.slice(26)), units: BigInt(log.data) });
       else truncated = true;
     }
     const hashes = [...byTx.keys()];
     const txs = await readTransactions(chain, hashes, fetchImpl);
+    // A Transfer log proves money moved, but a missing transaction does not prove its reference was
+    // absent. In particular an overpayment could already pay this invoice. Keep Pay locked until
+    // every transaction in the bounded scan can be classified.
+    if (txs.some((tx) => tx === null)) throw new Error("RPC did not return every payment transaction");
     const payments: FoundPayment[] = hashes.map((txHash, i) => {
       const p = byTx.get(txHash)!;
       const tx = txs[i];
@@ -435,5 +460,5 @@ async function readTransactions(chain: MezoChain, hashes: string[], fetchImpl?: 
 
 /** Current block number, so a merchant can stamp an invoice when it is created. */
 export async function headBlock(chain: MezoChain, fetchImpl?: Fetch): Promise<number> {
-  return Number(await rpc<string>(chain, "eth_blockNumber", [], fetchImpl));
+  return blockNumber(await rpc<string>(chain, "eth_blockNumber", [], fetchImpl));
 }

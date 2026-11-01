@@ -12,6 +12,8 @@ import { payPageLock } from "../src/paystate.ts";
 import { MERCHANT_ELEMENT_IDS, payerMaxAmount, payerStatus, payerSummary } from "../src/payerview.ts";
 import { newReference } from "../src/invoices.ts";
 import { qrSvg } from "../src/qr.ts";
+import { connectPaymentWallet, type Eip1193, type WalletSession } from "../src/wallet.ts";
+import { clearFailedWalletAttempt, clearRejectedAttempt, markWalletAttemptUnknown, readWalletAttempt, recordWalletHash, writeWalletAttempt, type AttemptStorage, type WalletAttempt } from "../src/wallet-state.ts";
 
 const $ = <T = HTMLInputElement>(id: string) => document.getElementById(id) as unknown as T;
 
@@ -361,8 +363,6 @@ async function watchInvoice(chainId: number, memo: string): Promise<void> {
   await tick();
 }
 
-type Eip1193 = { request(args: { method: string; params?: unknown[] }): Promise<unknown> };
-
 /**
  * Pay page state from a chain check of the invoice. Pay stays locked unless the chain shows that the
  * invoice is open and the search covered every block since the invoice was created.
@@ -438,25 +438,30 @@ function applyInvoiceState(answer: InvoiceAnswer): void {
   setPayButton();
 }
 
-/** The hash this browser sent for an invoice, so a reload or a second tab does not pay again before the chain shows it. */
-const sentKey = (chainId: number, memo: string) => `musd-sent:${chainId}:${memo}`;
-/** A sent hash that the chain still does not know after this long was dropped, so it no longer locks Pay. */
-const SENT_FORGET_MS = 15 * 60_000;
+/** Local state is written before a wallet send request and retained when its outcome is uncertain. */
+const browserAttemptStorage: AttemptStorage = {
+  getItem: (key) => localStorage.getItem(key),
+  setItem: (key, value) => localStorage.setItem(key, value),
+  removeItem: (key) => localStorage.removeItem(key),
+};
+function readAttempt(chainId: number, memo: string): WalletAttempt | { status: "unreadable" } | null {
+  try { return readWalletAttempt(browserAttemptStorage, chainId, memo); }
+  catch { return { status: "unreadable" }; }
+}
 function readSent(chainId: number, memo: string): { hash: string; at: number } | null {
+  const attempt = readAttempt(chainId, memo);
+  return attempt?.status === "sent" ? attempt : null;
+}
+function recordSent(chainId: number, memo: string, id: string, hash: `0x${string}`): void {
   try {
-    const [hash, at] = (localStorage.getItem(sentKey(chainId, memo)) ?? "").split("|");
-    return hash && /^0x[0-9a-fA-F]{64}$/.test(hash) ? { hash, at: Number(at) || 0 } : null;
+    recordWalletHash(browserAttemptStorage, chainId, memo, id, hash, Date.now());
   } catch {
-    return null;
+    // The in-page lock remains. An earlier requesting marker is retained if this later write fails.
   }
 }
-function writeSent(chainId: number, memo: string, hash: string | null): void {
-  try {
-    if (hash) localStorage.setItem(sentKey(chainId, memo), `${hash}|${Date.now()}`);
-    else localStorage.removeItem(sentKey(chainId, memo));
-  } catch {
-    // Storage can be blocked. The chain check still runs.
-  }
+function clearReverted(chainId: number, memo: string, hash: string): boolean {
+  try { return clearFailedWalletAttempt(browserAttemptStorage, chainId, memo, hash); }
+  catch { return false; }
 }
 
 /**
@@ -464,6 +469,14 @@ function writeSent(chainId: number, memo: string, hash: string | null): void {
  * Returns true when Pay was locked for this reason.
  */
 async function lockIfSentHere(chainId: number, memo: string, a: InvoiceAnswer): Promise<boolean> {
+  const attempt = readAttempt(chainId, memo);
+  if (attempt && attempt.status !== "sent" && a.invoice && a.status !== "paid" && a.status !== "confirming") {
+    payLock = attempt.status === "unreadable" ? "Saved payment state could not be read. Check wallet activity before paying." : "A wallet payment request has an uncertain result. Check wallet activity before any retry.";
+    $("pay-banner").innerHTML = `<strong>${esc(payLock)}</strong> A payment may have been sent without returning a hash. Ask the merchant to check the invoice. Do not pay again until the result is known.`;
+    setPayerStatus(payLock);
+    setPayButton();
+    return true;
+  }
   const sent = readSent(chainId, memo);
   if (!sent || !a.invoice) return false;
   const hash = sent.hash;
@@ -495,11 +508,8 @@ async function lockIfSentHere(chainId: number, memo: string, a: InvoiceAnswer): 
   try {
     const q = new URLSearchParams({ chain: String(chainId), tx: hash, to: a.invoice.to, amount: a.invoice.amount, memo, from_block: String(a.invoice.fromBlock) });
     const v = (await (await fetch(`/api/verify?${q}`)).json()) as { status?: string };
-    const dropped = v.status === "not_found" && Date.now() - sent.at > SENT_FORGET_MS;
-    if (v.status === "failed" || v.status === "mismatch" || dropped) {
-      writeSent(chainId, memo, null);
-      return false;
-    }
+    // A missing or mismatched RPC answer does not prove that the wallet never broadcast the payment.
+    if (v.status === "failed" && clearReverted(chainId, memo, hash)) return false;
     if (v.status === "paid_no_memo") {
       showReferenceMissing();
       return true;
@@ -584,9 +594,9 @@ async function confirmByHash(chainId: number, memo: string, tx: string): Promise
 }
 
 /** Stop when the link in the box is not the invoice of this pay page, for example after a chip replaced it. */
-function linkMatchesInvoice(payment: { recipient: string; amount: bigint; memo: string | null }): boolean {
+function linkMatchesInvoice(payment: { chainId: number; recipient: string; amount: bigint; memo: string | null }): boolean {
   if (!payInvoice) return true;
-  return !!payInvoice.to && payment.recipient.toLowerCase() === payInvoice.to.toLowerCase() && payment.amount.toString() === payInvoice.units && payment.memo === payInvoice.memo;
+  return payment.chainId === payInvoice.chainId && !!payInvoice.to && payment.recipient.toLowerCase() === payInvoice.to.toLowerCase() && payment.amount.toString() === payInvoice.units && payment.memo === payInvoice.memo;
 }
 
 /** Ask the chain again. Returns false and shows why when Pay must stay locked. */
@@ -600,70 +610,115 @@ async function recheckBeforeSend(): Promise<boolean> {
 
 async function payWithWallet(): Promise<void> {
   if (!lastCheck || !lastCheck.ok || payLock || paying) return;
-  paying = true; // before any await, so a second click cannot start a second payment
+  paying = true;
   setPayButton();
   const eth = (window as unknown as { ethereum?: Eip1193 }).ethereum;
   const { tx, payment } = lastCheck;
   const chain = chainById(tx.chainId)!;
+  const invoice = payInvoice ? { ...payInvoice } : null;
   const out = payOut();
   const check = lastCheck;
   const status = (html: string) => (out.innerHTML = renderVerdict(check) + `<div class="note">${html}</div>`);
-  let hash: string | null = null;
-  try {
-    if (!eth) return;
-    if (!linkMatchesInvoice(payment)) {
-      status("The link in the box is not the invoice of this page. Reload the page to pay the invoice. Nothing was sent.");
-      return;
+  let hash: `0x${string}` | null = null;
+  let wallet: WalletSession | null = null;
+  let requestId: string | null = null;
+  let requested = false;
+  const sameInvoice = () => !invoice ? payInvoice === null : !!payInvoice && invoice.chainId === payInvoice.chainId && invoice.memo === payInvoice.memo;
+  const uncertain = (message: string) => {
+    if (invoice && requestId) {
+      try { markWalletAttemptUnknown(browserAttemptStorage, invoice.chainId, invoice.memo, requestId); }
+      catch { /* The requesting marker is already saved. Keep it. */ }
     }
-    const [from] = (await eth.request({ method: "eth_requestAccounts" })) as string[];
-    const hexId = "0x" + chain.id.toString(16);
+    payLock = "The wallet did not confirm whether the payment was sent. Check wallet activity before any retry.";
+    setPayerStatus(payLock);
+    status(`${esc(message)} Do not pay again until the result is known.`);
+  };
+  const prepareAndSend = async () => {
     try {
-      await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: hexId }] });
-    } catch (e) {
-      if ((e as { code?: number }).code !== 4902) throw e;
-      await eth.request({
-        method: "wallet_addEthereumChain",
-        params: [{ chainId: hexId, chainName: chain.name, nativeCurrency: { name: "Bitcoin", symbol: "BTC", decimals: 18 }, rpcUrls: [chain.rpc], blockExplorerUrls: [chain.explorer] }],
-      });
-    }
-    const bal = (await (await fetch(`/api/balance?chain=${chain.id}&address=${from}`)).json()) as { balance?: string; error?: string };
-    if (!bal.balance) throw new Error(bal.error ?? "balance read failed");
-    if (BigInt(bal.balance) < payment.amount) {
-      status(`Your wallet holds ${esc(formatAmount(BigInt(bal.balance)))} MUSD on ${esc(chain.name)}, less than ${esc(payment.amountText)}. Nothing was sent. See below how much BTC would mint the rest.`);
-      $("b-need").value = formatAmount(payment.amount - BigInt(bal.balance));
-      $<HTMLSelectElement>("b-chain").value = String(chain.id);
-      if (isPayerView()) {
-        $("b-panel").hidden = false;
-        $("pv-short").hidden = true;
+      if (!eth) return;
+      if (!sameInvoice() || !linkMatchesInvoice(payment)) throw new Error("The payment link changed. Reload the invoice before paying.");
+      wallet = await connectPaymentWallet(eth, chain);
+      const from = wallet.account;
+      const res = await fetch(`/api/balance?chain=${chain.id}&address=${encodeURIComponent(from)}`);
+      const bal = (await res.json()) as { balance?: string; error?: string };
+      if (!res.ok || !bal.balance) throw new Error(bal.error ?? "The balance could not be read.");
+      if (BigInt(bal.balance) < payment.amount) {
+        status(`Your wallet holds ${esc(formatAmount(BigInt(bal.balance)))} MUSD on ${esc(chain.name)}, less than ${esc(payment.amountText)}. Nothing was sent. See below how much BTC would mint the rest.`);
+        $("b-need").value = formatAmount(payment.amount - BigInt(bal.balance));
+        $<HTMLSelectElement>("b-chain").value = String(chain.id);
+        if (isPayerView()) { $("b-panel").hidden = false; $("pv-short").hidden = true; }
+        void runBorrow();
+        return;
       }
-      void runBorrow();
-      return;
+      if (!sameInvoice() || !linkMatchesInvoice(payment)) throw new Error("The payment link changed. Reload the invoice before paying.");
+      if (!(await recheckBeforeSend())) { status(`${esc(payLock ?? "Pay is locked.")} Nothing was sent.`); return; }
+      const result = await wallet.send(tx, () => {
+        // No await separates this check, the saved attempt and eth_sendTransaction.
+        if (!sameInvoice() || !linkMatchesInvoice(payment)) throw new Error("The invoice changed. No payment was requested.");
+        if (invoice) {
+          const earlier = readAttempt(invoice.chainId, invoice.memo);
+          if (earlier) {
+            payLock = earlier.status === "unreadable" ? "Saved payment state could not be read. Check wallet activity before paying." : "This browser has an earlier payment request for the invoice. Check wallet activity before retrying.";
+            setPayerStatus(payLock);
+            throw new Error(payLock);
+          }
+          requestId = crypto.randomUUID();
+          try { writeWalletAttempt(browserAttemptStorage, invoice.chainId, invoice.memo, { status: "requesting", id: requestId, at: Date.now(), from }); }
+          catch {
+            payLock = "This browser could not save the payment state. Allow site storage, then check this invoice again.";
+            setPayerStatus(payLock);
+            throw new Error(payLock);
+          }
+        }
+        requested = true;
+      });
+      if (result.status === "rejected") {
+        if (invoice && requestId) clearRejectedAttempt(browserAttemptStorage, invoice.chainId, invoice.memo, requestId);
+        if (invoice && readAttempt(invoice.chainId, invoice.memo)) {
+          payLock = "An earlier payment state remains. Check wallet activity before retrying.";
+          setPayerStatus(payLock);
+        }
+        status(`${esc(result.message)} No payment was sent.`);
+        return;
+      }
+      if (result.status === "unknown") { uncertain(result.message); return; }
+      hash = result.hash;
+      if (invoice && requestId) recordSent(invoice.chainId, invoice.memo, requestId, hash);
+      payLock = "You sent a payment from this page. Do not pay again.";
+      setPayerStatus(payLock);
+    } catch (error) {
+      if (requested) uncertain((error as Error).message ?? "The wallet result is uncertain.");
+      else status(`${esc((error as Error).message ?? String(error))} No payment was requested.`);
+    } finally {
+      try { wallet?.close(); } catch { /* Removing listeners cannot change a send result. */ }
     }
-    // Check the chain again right before the wallet window opens. The page may have been open for a long time.
-    if (!(await recheckBeforeSend())) {
-      status(`${esc(payLock ?? "Pay is locked.")} Nothing was sent.`);
-      return;
-    }
-    hash = (await eth.request({ method: "eth_sendTransaction", params: [{ from, to: tx.to, value: "0x0", data: tx.data }] })) as string;
-  } catch (e) {
-    status(`Wallet error. ${esc((e as Error).message ?? String(e))} Nothing was sent.`);
+  };
+  try {
+    // Web Locks coordinates tabs of this origin while a wallet prompt is open. The saved attempt then
+    // keeps reloads and later tabs locked. Different browsers can still race; the chain remains final.
+    if (invoice && navigator.locks?.request) {
+      await navigator.locks.request(`musd-pay:${invoice.chainId}:${invoice.memo}`, { mode: "exclusive", ifAvailable: true }, async (lock) => {
+        if (!lock) {
+          payLock = "Another tab is preparing a payment for this invoice. Check that tab before retrying.";
+          setPayerStatus(payLock);
+          status(esc(payLock));
+          return;
+        }
+        await prepareAndSend();
+      });
+    } else await prepareAndSend();
+  } catch (error) {
+    if (hash) status(`The wallet returned transaction ${esc(hash)}. Check its result before any retry.`);
+    else if (requested) uncertain((error as Error).message ?? "The wallet result is uncertain.");
+    else status(`${esc((error as Error).message ?? String(error))} No payment was requested.`);
   } finally {
-    if (!hash) {
-      paying = false;
-      setPayButton();
-    }
+    paying = false;
+    setPayButton();
   }
-  if (!hash) return;
-  // From here the money has left. The page never offers to pay again and never says "error" for a network hiccup.
-  if (payInvoice) writeSent(payInvoice.chainId, payInvoice.memo, hash);
-  payLock = "You sent a payment from this page. Do not pay again.";
-  setPayerStatus("You sent a payment from this page. Do not pay again.");
-  paying = false;
-  setPayButton();
-  await followPayment(hash, payment, chain, status);
+  if (hash) await followPayment(hash, payment, chain, status, invoice);
 }
 
-async function followPayment(hash: string, payment: { recipient: string; amountText: string; memo: string | null }, chain: NonNullable<ReturnType<typeof chainById>>, status: (html: string) => void): Promise<void> {
+async function followPayment(hash: string, payment: { recipient: string; amountText: string; memo: string | null }, chain: NonNullable<ReturnType<typeof chainById>>, status: (html: string) => void, invoice: { chainId: number; memo: string } | null): Promise<void> {
   const link = `<a href="${chain.explorer}/tx/${esc(hash)}" target="_blank" rel="noopener">${esc(hash)}</a>`;
   status(`Sent. ${link}. Waiting for the receipt. Do not pay again.`);
   const q = new URLSearchParams({ chain: String(chain.id), tx: hash, to: payment.recipient, amount: payment.amountText, memo: payment.memo ?? "" });
@@ -690,10 +745,10 @@ async function followPayment(hash: string, payment: { recipient: string; amountT
     if (v.status === "paid" && v.final === true) {
       let rec = "";
       let refund = false;
-      if (payInvoice) {
-        const c = await confirmByHash(payInvoice.chainId, payInvoice.memo, hash);
+      if (invoice) {
+        const c = await confirmByHash(invoice.chainId, invoice.memo, hash);
         refund = c.status === "already_paid";
-        rec = c.status === "paid" ? ` Invoice ${esc(payInvoice.memo)} is recorded as paid.`
+        rec = c.status === "paid" ? ` Invoice ${esc(invoice.memo)} is recorded as paid.`
           : refund ? ` <strong>This invoice was already paid. Contact the merchant for a refund.</strong> Your payment is a duplicate and does not count for the invoice.`
           : ` The invoice is not recorded yet (${esc(c.message ?? c.status)}). It is recorded on the next check, or the merchant can record it by hash.`;
       }
@@ -702,9 +757,9 @@ async function followPayment(hash: string, payment: { recipient: string; amountT
       return;
     }
     if (v.status === "failed" || v.status === "mismatch") {
-      if (payInvoice) writeSent(payInvoice.chainId, payInvoice.memo, null);
-      setPayerStatus("The payment did not succeed. Reload the page before you try again.");
-      status(`${esc(v.message ?? v.status)} ${link}. Reload the page before you try again.`);
+      if (invoice && v.status === "failed") clearReverted(invoice.chainId, invoice.memo, hash);
+      setPayerStatus(v.status === "failed" ? "The transaction reverted. Reload the page before trying again." : "The transfer does not match the invoice. Check the transaction before any retry.");
+      status(`${esc(v.message ?? v.status)} ${link}. ${v.status === "failed" ? "The transaction reverted. Reload the page before trying again." : "Check the transaction and contact the merchant before any retry."}`);
       return;
     }
     // pending, not_found, unavailable, 429: ask again
