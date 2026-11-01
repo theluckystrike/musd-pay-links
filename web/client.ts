@@ -652,7 +652,7 @@ async function payWithWallet(): Promise<void> {
       if (BigInt(bal.balance) < payment.amount) {
         status(`Your wallet holds ${esc(formatAmount(BigInt(bal.balance)))} MUSD on ${esc(chain.name)}, less than ${esc(payment.amountText)}. Nothing was sent. See below how much BTC would mint the rest.`);
         $("b-need").value = formatAmount(payment.amount - BigInt(bal.balance));
-        $<HTMLSelectElement>("b-chain").value = String(chain.id);
+        setBorrowNetwork(chain.id);
         if (isPayerView()) { $("b-panel").hidden = false; $("pv-short").hidden = true; }
         void runBorrow();
         return;
@@ -849,6 +849,13 @@ interface BorrowAnswer {
   quote: { need: string; borrow: string; fee: string; totalDebt: string; ratio: string; collateral: string; minCollateral: string; liquidationPrice: string; yearlyInterest: string; notes: string[] };
 }
 
+function setBorrowNetwork(chainId: number): void {
+  const select = $<HTMLSelectElement>("b-chain");
+  select.value = String(chainId);
+  // Programmatic selections must invalidate the previous loan review and update testnet controls.
+  select.dispatchEvent(new Event("change"));
+}
+
 const usd = (units: string) => Number(formatAmount(BigInt(units)).split(".")[0]).toLocaleString("en-US");
 const btc = (units: string) => {
   const [w, f = ""] = formatAmount(BigInt(units)).split(".");
@@ -859,10 +866,15 @@ const musd = (units: string) => {
   return `${Number(w).toLocaleString("en-US")}${f ? "." + f.slice(0, 2).padEnd(2, "0") : ""}`;
 };
 
+let borrowQuoteRequest = 0;
 async function runBorrow(): Promise<void> {
+  const request = ++borrowQuoteRequest;
   const chain = $<HTMLSelectElement>("b-chain").value;
   const need = $("b-need").value.trim();
   const ratio = $("b-ratio").value.trim();
+  const current = () => request === borrowQuoteRequest
+    && $<HTMLSelectElement>("b-chain").value === chain
+    && $("b-need").value.trim() === need && $("b-ratio").value.trim() === ratio;
   const out = $("b-out");
   if (parseAmount(need) === null) {
     out.innerHTML = `<div class="verdict bad"><strong>Enter the MUSD you need, for example 25.</strong></div>`;
@@ -873,6 +885,7 @@ async function runBorrow(): Promise<void> {
     const q = new URLSearchParams({ chain, need, ratio });
     const res = await fetch(`/api/borrow?${q}`);
     const v = (await res.json()) as BorrowAnswer;
+    if (!current()) return;
     if (!res.ok || v.error) throw new Error(v.error ?? `HTTP ${res.status}`);
     const t = v.terms;
     const k = v.quote;
@@ -889,7 +902,7 @@ async function runBorrow(): Promise<void> {
       <ul class="muted">${k.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>
       <div class="actions"><a class="button" href="${esc(v.borrowAt)}" target="_blank" rel="noopener">Borrow MUSD in the Mezo app (borrow page)</a></div></div>`;
   } catch (e) {
-    out.innerHTML = `<div class="verdict bad"><strong>Could not read the MUSD protocol right now. ${esc((e as Error).message)}</strong></div>`;
+    if (current()) out.innerHTML = `<div class="verdict bad"><strong>Could not read the MUSD protocol right now. ${esc((e as Error).message)}</strong></div>`;
   }
 }
 
@@ -912,7 +925,7 @@ async function runCanPay(): Promise<void> {
     }
     out.innerHTML = `<div class="verdict bad"><strong>This address holds ${esc(formatAmount(have))} MUSD, short by ${esc(formatAmount(payment.amount - have))}. You can mint MUSD against BTC without selling it. The quote is below.</strong></div>`;
     $("b-need").value = formatAmount(payment.amount - have);
-    $<HTMLSelectElement>("b-chain").value = String(payment.chainId);
+    setBorrowNetwork(payment.chainId);
     void runBorrow();
   } catch (e) {
     out.innerHTML = `<div class="verdict bad"><strong>${esc((e as Error).message)}</strong></div>`;
@@ -971,7 +984,7 @@ function init(): void {
   $("pv-short").onclick = () => {
     $("b-panel").hidden = false;
     $("pv-short").hidden = true;
-    $<HTMLSelectElement>("b-chain").value = String(payInvoice?.chainId ?? 31611);
+    setBorrowNetwork(payInvoice?.chainId ?? 31611);
     $("b-panel").scrollIntoView({ behavior: "smooth" });
     void runBorrow();
   };

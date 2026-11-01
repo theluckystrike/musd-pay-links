@@ -169,8 +169,10 @@ export function initBorrowWallet(): void {
   const updateNetwork = () => {
     box("b-direct").hidden = field("b-chain").value !== String(MEZO_TESTNET.id);
     resetReview();
+    box("b-out").replaceChildren();
   };
   for (const id of ["b-need", "b-ratio", "b-collateral"]) field(id).addEventListener("input", () => {
+    if (id !== "b-collateral") box("b-out").replaceChildren();
     if (reviewed) { resetReview(); message("Loan inputs changed. Prepare a new review before opening a loan."); }
   });
   field("b-chain").addEventListener("change", updateNetwork);

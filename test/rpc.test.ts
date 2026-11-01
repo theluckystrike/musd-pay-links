@@ -28,6 +28,7 @@ beforeAll(() => {
 
 const SHOP = "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed";
 const HASH = "0x" + "ab".repeat(32);
+const TEST_CHAIN_WITH_FALLBACK = { ...MEZO_TESTNET, rpcFallback: "https://fallback.invalid" };
 const pad = (a: string) => "0x" + a.toLowerCase().slice(2).padStart(64, "0");
 
 function mockRpc(handlers: Record<string, (params: unknown[]) => unknown>): Fetch {
@@ -198,7 +199,7 @@ describe("verifyPayment", () => {
     expect(r).toEqual({ status: "unavailable", message: NETWORK_UNAVAILABLE_MESSAGE });
   });
 
-  it("falls back to the second testnet endpoint when the first answers null for a mined receipt", async () => {
+  it("uses a configured fallback when the primary answers null for a mined receipt", async () => {
     const working = mockRpc({ ...base,
       eth_getTransactionReceipt: () => receipt([{ address: MEZO_TESTNET.musd, to: SHOP, value: 5n }]),
       eth_getTransactionByHash: () => ({ input: "0x", to: MEZO_TESTNET.musd }),
@@ -210,8 +211,7 @@ describe("verifyPayment", () => {
       }
       return working(url, init);
     };
-    expect(MEZO_TESTNET.rpcFallback).toBe("https://mezo-testnet.drpc.org");
-    expect(await verifyPayment(MEZO_TESTNET, { txHash: HASH, recipient: SHOP, amount: 5n }, f)).toMatchObject({ status: "paid" });
+    expect(await verifyPayment(TEST_CHAIN_WITH_FALLBACK, { txHash: HASH, recipient: SHOP, amount: 5n }, f)).toMatchObject({ status: "paid" });
   });
 
   it("refuses a payment mined before the invoice block, so an old transfer cannot be replayed", async () => {
@@ -603,8 +603,8 @@ describe("rpcBatch", () => {
       return new Response(JSON.stringify(body.map((b) => (broken && b.id === 1 ? { jsonrpc: "2.0", id: b.id, error: { message: "method does not exist" } } : { jsonrpc: "2.0", id: b.id, result: b.id }))));
     };
     const calls = [0, 1, 2].map(() => ({ method: "eth_blockNumber", params: [] }));
-    expect(await rpcBatch(MEZO_TESTNET, calls, f)).toEqual([0, 1, 2]);
-    expect(urls).toEqual([MEZO_TESTNET.rpc, MEZO_TESTNET.rpcFallback]);
+    expect(await rpcBatch(TEST_CHAIN_WITH_FALLBACK, calls, f)).toEqual([0, 1, 2]);
+    expect(urls).toEqual([MEZO_TESTNET.rpc, TEST_CHAIN_WITH_FALLBACK.rpcFallback]);
   });
 
   it("matches answers by id even when the node returns them out of order", async () => {
@@ -658,13 +658,19 @@ describe.runIf(process.env.LIVE === "1")("live Mezo RPC (LIVE=1)", () => {
   it("mainnet MUSD reports Mezo USD, MUSD, 18 decimals", async () => {
     expect(await readTokenInfo(MEZO_MAINNET)).toMatchObject({ name: "Mezo USD", symbol: "MUSD", decimals: 18 });
   }, 30000);
-  it("both testnet endpoints and both mainnet endpoints serve the right chain", async () => {
+  it("every configured endpoint serves the right chain and can read blocks and balances", async () => {
     for (const c of [MEZO_TESTNET, MEZO_MAINNET]) {
-      for (const url of [c.rpc, c.rpcFallback!]) {
+      for (const url of [c.rpc, ...(c.rpcFallback ? [c.rpcFallback] : [])]) {
         // Retry transport/RPC errors on this exact endpoint. A wrong chain still fails immediately;
         // a healthy fallback must not hide a broken endpoint in this availability check.
-        const result = await rpc<string>({ ...c, rpc: url, rpcFallback: undefined }, "eth_chainId", []);
+        const endpoint = { ...c, rpc: url, rpcFallback: undefined };
+        const result = await rpc<string>(endpoint, "eth_chainId", []);
         expect(Number(result), url).toBe(c.id);
+        const header = await rpc<{ number: string; hash: string }>(endpoint, "eth_getBlockByNumber", ["latest", false]);
+        expect(header?.hash, url).toMatch(/^0x[0-9a-f]{64}$/i);
+        expect(header?.number, url).toMatch(/^0x[0-9a-f]+$/i);
+        const balance = await rpc<string>(endpoint, "eth_getBalance", [SHOP, "latest"]);
+        expect(balance, url).toMatch(/^0x[0-9a-f]+$/i);
       }
     }
   }, 30000);

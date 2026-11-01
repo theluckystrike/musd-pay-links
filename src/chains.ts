@@ -53,9 +53,8 @@ export const MEZO_TESTNET: MezoChain = {
   // The Mezo docs list one testnet HTTP endpoint, https://rpc.test.mezo.org
   // (https://mezo.org/docs/developers/getting-started/configure-environment/).
   rpc: "https://rpc.test.mezo.org",
-  // Public third-party provider (dRPC), not in the Mezo docs. It answers eth_chainId 0x7b7b and serves
-  // receipts that a lagging node behind the first endpoint sometimes answers as null.
-  rpcFallback: "https://mezo-testnet.drpc.org",
+  // As of 2026-11-01 the former dRPC fallback answers chainId but rejects transaction, receipt,
+  // balance and block reads. Keep only the documented working endpoint; retries remain bounded.
   explorer: "https://explorer.test.mezo.org",
   testnet: true,
   system: {
