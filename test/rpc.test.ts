@@ -1,5 +1,5 @@
 import { encodeAbiParameters } from "viem";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { canonicalBlock, canonicalBlockHash, minedReceipt, minedTransaction } from "./chain-fixtures.ts";
 
 import { MEZO_MAINNET, MEZO_TESTNET } from "../src/chains.ts";
@@ -12,6 +12,7 @@ import {
   LOG_CHUNK,
   MAX_LOOKBACK,
   PAYMENT_SCAN_REQUEST_LIMIT,
+  RPC_HTTP_TIMEOUT_MS,
   memoFromInput,
   NETWORK_UNAVAILABLE_MESSAGE,
   readBalance,
@@ -622,6 +623,104 @@ describe("rpcBatch", () => {
     };
     await expect(rpcBatch(MEZO_TESTNET, [{ method: "eth_getLogs", params: [] }], f, { allowNull: false })).rejects.toThrow("null");
     expect(await rpcBatch(MEZO_TESTNET, [{ method: "x", params: [] }], f)).toEqual([null]);
+  });
+});
+
+describe.each([
+  { kind: "single", read: (fetch: Fetch) => rpc<string>(TEST_CHAIN_WITH_FALLBACK, "eth_chainId", [], fetch), expected: "0x7b7b" },
+  { kind: "batch", read: (fetch: Fetch) => rpcBatch<string>(TEST_CHAIN_WITH_FALLBACK, [{ method: "eth_chainId", params: [] }], fetch), expected: ["0x7b7b"] },
+])("$kind RPC HTTP deadline", ({ read, expected }) => {
+  it.each(["responsive", "stalled"])("cancels an unread HTTP error body with %s cancellation and preserves its status", async (cancellation) => {
+    vi.useFakeTimers();
+    try {
+      const signals: AbortSignal[] = []; let cancellations = 0;
+      const fetch: Fetch = async (_url, init) => {
+        signals.push(init!.signal!);
+        return new Response(new ReadableStream({ cancel() {
+          cancellations++;
+          if (cancellation === "stalled") return new Promise<void>(() => {});
+        } }), { status: 503 });
+      };
+      const outcome = read(fetch).then(() => null, (error: unknown) => error);
+      await vi.runAllTimersAsync();
+      expect(await outcome).toMatchObject({ message: expect.stringMatching(/RPC (?:eth_chainId|batch) HTTP 503/) });
+      expect(cancellations).toBe(3);
+      expect(signals).toHaveLength(3);
+      expect(signals.every((signal) => signal.aborted)).toBe(cancellation === "stalled");
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each(["fetch", "body"])("aborts a stalled %s and proceeds to the fallback with no deadline timers left", async (stage) => {
+    vi.useFakeTimers();
+    try {
+      const urls: string[] = []; const signals: AbortSignal[] = []; let bodyAborted = false;
+      const fetch: Fetch = async (url, init) => {
+        urls.push(url); const signal = init!.signal!; signals.push(signal);
+        if (urls.length === 1) {
+          if (stage === "fetch") return new Promise<Response>((_resolve, reject) => {
+            signal.addEventListener("abort", () => reject(new DOMException("Transport aborted", "AbortError")), { once: true });
+          });
+          // Spend half the deadline receiving headers, then hang while consuming the body. The
+          // deadline must cover both stages together, rather than restart when fetch resolves.
+          await new Promise<void>((resolve) => setTimeout(resolve, RPC_HTTP_TIMEOUT_MS / 2));
+          return new Response(new ReadableStream({ start(controller) {
+            signal.addEventListener("abort", () => { bodyAborted = true; controller.error(new DOMException("Body aborted", "AbortError")); }, { once: true });
+          } }));
+        }
+        const request = JSON.parse(String(init!.body));
+        const answer = (entry: { id: number }) => ({ jsonrpc: "2.0", id: entry.id, result: "0x7b7b" });
+        return new Response(JSON.stringify(Array.isArray(request) ? request.map(answer) : answer(request)));
+      };
+      const pending = read(fetch);
+      await vi.advanceTimersByTimeAsync(RPC_HTTP_TIMEOUT_MS - 1);
+      expect(urls).toEqual([TEST_CHAIN_WITH_FALLBACK.rpc]);
+      expect(signals[0]!.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(signals[0]!.aborted).toBe(true);
+      if (stage === "body") expect(bodyAborted).toBe(true);
+      await vi.advanceTimersByTimeAsync(retry.delayMs);
+      expect(await pending).toEqual(expected);
+      expect(urls).toEqual([TEST_CHAIN_WITH_FALLBACK.rpc, TEST_CHAIN_WITH_FALLBACK.rpcFallback]);
+      expect(signals[1]!.aborted).toBe(false);
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(RPC_HTTP_TIMEOUT_MS);
+      expect(signals[1]!.aborted).toBe(false);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each(["fetch", "body"])("bounds all attempts even if a custom stalled %s ignores abort", async (stage) => {
+    vi.useFakeTimers();
+    try {
+      const urls: string[] = []; const signals: AbortSignal[] = [];
+      const fetch: Fetch = async (url, init) => {
+        urls.push(url); signals.push(init!.signal!);
+        if (stage === "fetch") return new Promise<Response>(() => {});
+        return new Response(new ReadableStream({ start() { /* Never produces or closes a body. */ } }));
+      };
+      // Attach rejection handling before advancing the deadline clock.
+      const outcome = read(fetch).then(() => null, (error: unknown) => error);
+      await vi.runAllTimersAsync();
+      expect(await outcome).toMatchObject({ message: "RPC request timed out" });
+      expect(urls).toEqual([TEST_CHAIN_WITH_FALLBACK.rpc, TEST_CHAIN_WITH_FALLBACK.rpcFallback, TEST_CHAIN_WITH_FALLBACK.rpc]);
+      expect(signals.every((signal) => signal.aborted)).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+});
+
+describe("payment verification HTTP deadline", () => {
+  it("keeps a timed-out receipt check unavailable with the public retry message", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetch: Fetch = (_url, init) => new Promise<Response>((_resolve, reject) => {
+        init!.signal!.addEventListener("abort", () => reject(new Error("private transport details")), { once: true });
+      });
+      const pending = verifyPayment(TEST_CHAIN_WITH_FALLBACK, { txHash: HASH, recipient: SHOP, amount: 5n }, fetch);
+      await vi.runAllTimersAsync();
+      expect(await pending).toEqual({ status: "unavailable", message: NETWORK_UNAVAILABLE_MESSAGE });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
   });
 });
 

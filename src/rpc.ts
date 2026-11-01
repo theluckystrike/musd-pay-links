@@ -12,6 +12,8 @@ export const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11
 
 /** Wait between two retries of a read, multiplied by the attempt number. */
 export const RETRY_DELAY_MS = 300;
+/** One HTTP attempt, including response body consumption, must finish within this deadline. */
+export const RPC_HTTP_TIMEOUT_MS = 8_000;
 /** Bound one invoice scan, including retries, so two scans plus store calls fit a Worker request. */
 export const PAYMENT_SCAN_REQUEST_LIMIT = 18;
 /** Retry timing. Tests lower `delayMs` so they run fast; production code never changes it. */
@@ -19,14 +21,49 @@ export const retry = { delayMs: RETRY_DELAY_MS };
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-async function rpcAt<T>(url: string, method: string, params: unknown[], fetchImpl: Fetch): Promise<T> {
-  const res = await fetchImpl(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+async function rpcBody<T>(url: string, payload: unknown, label: string, fetchImpl: Fetch): Promise<T> {
+  const controller = new AbortController();
+  let responseError: Error | undefined;
+  let timer: ReturnType<typeof setTimeout>;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new Error("RPC request timed out"));
+    }, RPC_HTTP_TIMEOUT_MS);
   });
-  if (!res.ok) throw new Error(`RPC ${method} HTTP ${res.status}`);
-  const body = (await res.json()) as { result?: T; error?: { message: string } };
+  try {
+    // Keep the same deadline until JSON consumption finishes. A response's headers alone do not
+    // establish that its body will arrive. The race also bounds custom fetches that ignore abort.
+    return await Promise.race([
+      (async () => {
+        const res = await fetchImpl(url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload),
+          signal: controller.signal,
+        });
+        if (!res.ok) {
+          responseError = new Error(`${label} HTTP ${res.status}`);
+          // Release an unread error body before retrying. A stalled cancellation is covered by the
+          // same deadline, and cannot replace the already observed HTTP status with a body error.
+          try { await res.body?.cancel(); } catch { /* Preserve the HTTP error. */ }
+          throw responseError;
+        }
+        return await res.json() as T;
+      })(),
+      deadline,
+    ]);
+  } catch (error) {
+    if (responseError) throw responseError;
+    if (controller.signal.aborted) throw new Error("RPC request timed out");
+    throw error;
+  } finally {
+    clearTimeout(timer!);
+  }
+}
+
+async function rpcAt<T>(url: string, method: string, params: unknown[], fetchImpl: Fetch): Promise<T> {
+  const body = await rpcBody<{ result?: T; error?: { message: string } }>(url, { jsonrpc: "2.0", id: 1, method, params }, `RPC ${method}`, fetchImpl);
   if (body.error) throw new Error(`RPC ${method} error ${body.error.message}`);
   return body.result as T;
 }
@@ -334,13 +371,9 @@ export async function rpcBatch<T>(
   let lastError: unknown = null;
   for (let i = 0; i < tries; i++) {
     try {
-      const res = await fetchImpl(urls[i % urls.length]!, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(calls.map((c, id) => ({ jsonrpc: "2.0", id, method: c.method, params: c.params }))),
-      });
-      if (!res.ok) throw new Error(`RPC batch HTTP ${res.status}`);
-      const body = (await res.json()) as { id: number; result?: T; error?: { message: string } }[];
+      const body = await rpcBody<{ id: number; result?: T; error?: { message: string } }[]>(
+        urls[i % urls.length]!, calls.map((c, id) => ({ jsonrpc: "2.0", id, method: c.method, params: c.params })), "RPC batch", fetchImpl,
+      );
       if (!Array.isArray(body) || body.length !== calls.length) throw new Error("RPC batch answer has the wrong length");
       const byId = new Map(body.map((b) => [b.id, b]));
       const out = calls.map((_c, id) => byId.get(id));
