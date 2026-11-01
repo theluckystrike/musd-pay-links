@@ -4,10 +4,10 @@ import { chainById } from "./chains.ts";
 import type { PayLock } from "./paystate.ts";
 
 /**
- * Elements that belong to the merchant. A pay page hides all of them, so the payer sees only the
+ * Merchant and developer content. A pay page hides all of it, so the payer sees only the
  * invoice summary, the status, the QR code and the Pay action.
  */
-export const MERCHANT_ELEMENT_IDS = ["steps", "live", "m-panel", "p-panel", "v-panel", "b-panel"] as const;
+export const MERCHANT_ELEMENT_IDS = ["steps", "live", "m-panel", "p-panel", "v-panel", "b-panel", "product-intro", "buildathon-meta", "developer-api"] as const;
 
 export interface PayerInvoice {
   chainId: number;

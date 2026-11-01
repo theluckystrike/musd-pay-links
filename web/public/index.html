@@ -91,9 +91,9 @@ footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
 <main>
   <header>
     <h1>MUSD Pay Links</h1>
-    <span class="muted">Mezo Buildathon, Access and Distribution track</span>
+    <span class="muted" id="buildathon-meta">Mezo Buildathon, Access and Distribution track</span>
   </header>
-  <p class="lede">A merchant asks for MUSD with a standard EIP-681 link, a QR code or a pay page sent in a chat. Before the payer's wallet or agent builds the transfer, the guard checks that the token is the real MUSD for that chain, that the recipient address is valid, and that the amount is within the payer's limit. A payer who is short of MUSD sees how much BTC would mint it in the MUSD protocol. The merchant finds the payment on chain by its invoice reference.</p>
+  <p class="lede" id="product-intro">A merchant asks for MUSD with a standard EIP-681 link, a QR code or a pay page sent in a chat. Before the payer's wallet or agent builds the transfer, the guard checks that the token is the real MUSD for that chain, that the recipient address is valid, and that the amount is within the payer's limit. A payer who is short of MUSD sees how much BTC would mint it in the MUSD protocol. The merchant finds the payment on chain by its invoice reference.</p>
   <ol class="steps" id="steps">
     <li>Create an invoice in panel 1. Share the QR code or the pay page.</li>
     <li>Check the link as the payer in panel 2. Try the bad links to see the guard refuse them.</li>
@@ -218,7 +218,7 @@ footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
 
   <footer>
     Open source under the MIT license at <a href="https://github.com/theluckystrike/musd-pay-links">github.com/theluckystrike/musd-pay-links</a>.
-    JSON API at <code>/api/check</code>, <code>/api/link</code>, <code>/api/invoices</code>, <code>/api/verify</code>, <code>/api/payments</code>, <code>/api/borrow</code>, <code>/api/token</code>. Built by Michael Lip, Warsaw, Poland.
+    <span id="developer-api">JSON API at <code>/api/check</code>, <code>/api/link</code>, <code>/api/invoices</code>, <code>/api/verify</code>, <code>/api/payments</code>, <code>/api/borrow</code>, <code>/api/token</code>.</span> Built by Michael Lip, Warsaw, Poland.
   </footer>
 </main>
 <script type="module" src="/client.js"></script>
