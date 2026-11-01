@@ -31,6 +31,8 @@ The Verification workflow uploads `.reports/` for its exact source revision. Its
 
 ## Browser-wallet proof
 
+The payment connection requests ordinary `wallet_requestPermissions` account consent after network selection. This can add one Connect prompt per payment connection. MetaMask can expose an account globally without granting it signing access on a newly added chain. The app validates the permission reply and rechecks the original payer and selected chain. Only explicit unsupported-method errors 4200 or -32601 use the legacy path with the same readback. These checks do not prove scoped authorization in every provider. A send-time 4100 error remains unknown; it does not unlock or repeat a send.
+
 The separate Browser wallet evidence workflow runs actual MetaMask in Chromium on a hosted Linux runner. It pins the official extension package digest and records its packaged identity. It uses a dedicated project test wallet and the local Worker. Never configure a production wallet for this harness.
 
 A successful wallet run requires the public `browser-evidence.json`, not just a green download or build step. It must identify the source commit, actual wallet and chain, signed invoice, rejected payment request, approved payment hash, exact reference-bearing MUSD transfer, required confirmations and paid invoice state after reload. The payer and merchant remain project test addresses. This proves neither outside use nor revenue.

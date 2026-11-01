@@ -835,10 +835,46 @@ async function selectTaskAccountPermissions(page, snapshot) {
     if (snapshot) requireConsentRoute(page, snapshot.route);
     if (!pumpRunning) throw new Error('Wallet review stopped');
     await page.getByTestId('account-selection-section').click();
-    await page.getByTestId('edit-accounts-modal-header').waitFor({ state: 'visible' });
-    check('Connect permission UI lists only the two task accounts', await page.locator('[data-testid^="multichain-account-cell-name-"]').count() === 2);
+    // Pinned MultichainEditAccountsPage renders the header independently of its filtered account
+    // list. Scope to that visible page and wait for both exact task rows before any selection.
+    const modal = page.locator('[data-testid="modal-page"].multichain-edit-accounts-page:visible');
+    await modal.getByTestId('edit-accounts-modal-header').waitFor({ state: 'visible' });
+    const readiness = { requestRoute: requestIdentity, observations: [], ready: false };
+    evidence.wallet.permissionAccountReadiness ??= [];
+    evidence.wallet.permissionAccountReadiness.push(readiness);
+    const names = modal.locator('[data-testid^="multichain-account-cell-name-"]');
+    const labels = ['Account 2', 'Account 1'];
+    let stableSince = 0;
+    let previousObservation;
+    await waitFor(async () => {
+      requireConsentRoute(page, snapshot.route);
+      const count = await names.count();
+      const taskRows = [];
+      for (const label of labels) {
+        const name = modal.getByTestId(`multichain-account-cell-name-${label}`);
+        const row = modal.locator('.multichain-account-cell').filter({ has: name });
+        taskRows.push({ label, count: await name.count(), visible: await name.isVisible().catch(() => false),
+          rowCount: await row.count(), checkboxCount: await row.getByRole('checkbox').count(),
+          checkboxVisible: await row.getByRole('checkbox').isVisible().catch(() => false) });
+      }
+      const observation = { count, taskRows };
+      const serialized = JSON.stringify(observation);
+      if (serialized !== previousObservation && readiness.observations.length < 12) {
+        readiness.observations.push({ ...observation, at: new Date().toISOString() });
+        previousObservation = serialized;
+        await checkpoint('wallet-permission-account-list-readiness', { count });
+      }
+      readiness.lastObservation = observation;
+      const ready = count === 2 && taskRows.every((row) => row.count === 1 && row.visible
+        && row.rowCount === 1 && row.checkboxCount === 1 && row.checkboxVisible);
+      stableSince = ready ? stableSince || Date.now() : 0;
+      readiness.ready = ready && Date.now() - stableSince >= 1_000;
+      return readiness.ready;
+    }, 15_000);
+    requireConsentRoute(page, snapshot.route);
+    check('Connect permission UI lists only the two task accounts', readiness.ready && await names.count() === 2);
     for (const label of ['Account 2', 'Account 1']) {
-      const row = page.locator('.multichain-account-cell').filter({ has: page.getByTestId(`multichain-account-cell-name-${label}`) });
+      const row = modal.locator('.multichain-account-cell').filter({ has: modal.getByTestId(`multichain-account-cell-name-${label}`) });
       const checkbox = row.getByRole('checkbox');
       if (!(await checkbox.isChecked())) {
         if (snapshot) requireConsentRoute(page, snapshot.route);
@@ -851,11 +887,12 @@ async function selectTaskAccountPermissions(page, snapshot) {
       check(`Connect UI explicitly permits task ${label}`, await checkbox.isChecked());
     }
     if (snapshot) requireConsentRoute(page, snapshot.route);
+    check('Connect task account list remains exact before saving', await names.count() === 2);
     walletPromptActions++;
     await journalWalletAction('connect', 'save-task-account-permissions');
     if (snapshot) requireConsentRoute(page, snapshot.route);
     if (!pumpRunning) throw new Error('Wallet review stopped');
-    await page.getByTestId('connect-more-accounts-button').click();
+    await modal.getByTestId('connect-more-accounts-button').click();
     await page.getByTestId('accounts-count-2').waitFor({ state: 'visible' });
     permissionReviewed.add(requestIdentity);
     evidence.wallet.accountPermissions = { method: 'Normal Connect edit-accounts UI', accounts: [evidence.accounts.merchant, evidence.accounts.payer], onlyTaskAccounts: true };

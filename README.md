@@ -39,6 +39,8 @@ The payer and merchant in this baseline are both project test addresses. These p
 
 ## How it protects the money
 
+After selecting the network, Pay may request account permission again through the wallet's normal consent screen. Check the account and network there. The page keeps the original chosen payer and checks both values again. A permission reply alone does not establish compatibility with every wallet. An uncertain send stays locked even when the wallet reports an authorization error.
+
 - The pay page checks the chain when it opens and again before it asks the wallet. It binds the request to the selected account, chain and checked transfer. Pay stays locked when a matching payment exists, the search cannot cover every block since the invoice, or a check fails. Invoice sends require Web Locks to coordinate tabs. The page saves an attempt before asking the wallet and retains uncertain results across reloads; a missing RPC result does not unlock another request.
 - The page does not stop two different browsers. Two payers can still race, so both can pay the same open invoice before either payment is on chain. The invoice records the oldest payment. A later payment with the same reference is listed as a duplicate, with its transaction hash and a refund due.
 - A smaller payment with the reference, or a payment of the exact amount without it, also locks Pay. The payer must say it is not theirs first.
