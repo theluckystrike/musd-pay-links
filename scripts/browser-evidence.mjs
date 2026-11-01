@@ -40,6 +40,7 @@ let walletPromptActions = 0;
 let pumpPromise;
 let evidenceWrite = Promise.resolve();
 const acted = new WeakMap();
+const permissionReviewed = new WeakSet();
 const evidence = {
   startedAt: new Date().toISOString(),
   status: 'incomplete',
@@ -96,8 +97,8 @@ async function bounded(operation, ms, { watchPump = false } = {}) {
   finally { clearTimeout(timer); }
 }
 async function providerRequest(method) {
-  assert(['eth_requestAccounts', 'eth_chainId'].includes(method), 'Only reviewed provider methods are permitted');
-  const timeoutMs = method === 'eth_requestAccounts' ? 90_000 : 15_000;
+  assert(['eth_accounts', 'eth_chainId'].includes(method), 'Harness provider calls are read-only; connection comes from product UI');
+  const timeoutMs = 15_000;
   const request = { method, stage, status: 'pending', timeoutMs, startedAt: new Date().toISOString() };
   evidence.providerRequests.push(request);
   await checkpoint('provider-request-started', { method, timeoutMs });
@@ -152,6 +153,24 @@ async function journalWalletAction(kind, action) {
 }
 function isExtensionPage(page) {
   return !page.isClosed() && page.url().startsWith(`chrome-extension://${extensionId}/`);
+}
+async function recordExtensionTargets(boundary) {
+  const record = { boundary, at: new Date().toISOString(), targets: [] };
+  evidence.extensionTargetInventory ??= [];
+  evidence.extensionTargetInventory.push(record);
+  let session;
+  try {
+    session = await context.newCDPSession(wallet);
+    const inventory = await bounded(() => session.send('Target.getTargets'), 5_000);
+    const pageURLs = new Set(context.pages().map((page) => page.url()));
+    record.targets = inventory.targetInfos.filter((target) => target.url.startsWith(`chrome-extension://${extensionId}/`)).map((target) => {
+      const url = new URL(target.url);
+      return { type: target.type, pathname: url.pathname, route: url.hash.split('?')[0], representedByPlaywrightPage: pageURLs.has(target.url) };
+    });
+    // No target titles, query strings, raw URLs, DOM, storage or target identifiers are retained.
+  } catch (error) { record.failure = { errorClass: errorClass(error), reason: errorReason(error) }; }
+  finally { if (session) await session.detach().catch(() => {}); }
+  await persistEvidence();
 }
 async function pageMetadata(page) {
   const url = new URL(page.url());
@@ -426,7 +445,7 @@ async function chooseAccount(label, { create = false } = {}) {
 }
 function classifyConfirmation(text, url) {
   if (/Secret Recovery Phrase|Enter your password|unlock your wallet/i.test(text)) return 'forbidden';
-  if (/Connect this website with MetaMask|Review permissions/i.test(text) || /#\/connect\//.test(url)) return 'connect';
+  if (/Connect this website with MetaMask|Review permissions/i.test(text) || /#\/connect(?:\/|$)/.test(url)) return 'connect';
   if (/Signature request|Sign-in request/i.test(text)) return 'signature';
   if (/Add Mezo Testnet|Switch to Mezo Testnet|Switch network|Switch to this network/i.test(text)) return 'network';
   if (/Transaction request|Transaction|Send|Transfer/i.test(text) && /confirm/i.test(text)) return 'transaction';
@@ -450,13 +469,45 @@ async function publicButtonMetadata(page) {
     return { buttons: [], buttonDiagnosticFailure: { errorClass: errorClass(error), reason: errorReason(error) } };
   }
 }
+async function selectTaskAccountPermissions(page) {
+  if (permissionReviewed.has(page) || !(await visible(page, 'account-selection-section'))) return;
+  await bounded(async () => {
+    walletPromptActions++;
+    await journalWalletAction('connect', 'open-account-permission-selection');
+    if (!pumpRunning) throw new Error('Wallet review stopped');
+    await page.getByTestId('account-selection-section').click();
+    await page.getByTestId('edit-accounts-modal-header').waitFor({ state: 'visible' });
+    check('Connect permission UI lists only the two task accounts', await page.locator('[data-testid^="multichain-account-cell-name-"]').count() === 2);
+    for (const label of ['Account 2', 'Account 1']) {
+      const row = page.locator('.multichain-account-cell').filter({ has: page.getByTestId(`multichain-account-cell-name-${label}`) });
+      const checkbox = row.getByRole('checkbox');
+      if (!(await checkbox.isChecked())) {
+        walletPromptActions++;
+        await journalWalletAction('connect', `select-permitted-${label.replaceAll(' ', '-').toLowerCase()}`);
+        if (!pumpRunning) throw new Error('Wallet review stopped');
+        await checkbox.check();
+      }
+      check(`Connect UI explicitly permits task ${label}`, await checkbox.isChecked());
+    }
+    walletPromptActions++;
+    await journalWalletAction('connect', 'save-task-account-permissions');
+    if (!pumpRunning) throw new Error('Wallet review stopped');
+    await page.getByTestId('connect-more-accounts-button').click();
+    await page.getByTestId('accounts-count-2').waitFor({ state: 'visible' });
+    permissionReviewed.add(page);
+    evidence.wallet.accountPermissions = { method: 'Normal Connect edit-accounts UI', accounts: [evidence.accounts.merchant, evidence.accounts.payer], onlyTaskAccounts: true };
+  }, 30_000, { watchPump: true });
+}
 async function confirmationPump() {
   while (pumpRunning && Date.now() < DEADLINE) {
     for (const page of context.pages()) {
-      if (page === wallet || page === app || page.isClosed()) continue;
+      if (page === app || page.isClosed()) continue;
       const url = page.url();
       if (!url.startsWith(`chrome-extension://${extensionId}/`)) continue;
-      if (!/(?:notification|home)\.html/.test(url)) continue;
+      if (!/(?:notification|home|sidepanel)\.html/.test(url)) continue;
+      // Pending requests can render in an existing full-page wallet, not just a new notification.
+      // Do not inspect ordinary home/settings pages or any onboarding/recovery route.
+      if (!/\/notification\.html/.test(url) && !/#\/(?:confirmation|confirm-transaction|confirm|connect)(?:\/|$)/.test(url)) continue;
       let reviewKind = 'unknown';
       let actionAttempted = false;
       try {
@@ -481,6 +532,7 @@ async function confirmationPump() {
         if (kind === 'connect' || kind === 'signature') {
           check(`Wallet ${kind} belongs to the local test application`, /127\.0\.0\.1|localhost/.test(text));
         }
+        if (kind === 'connect') await selectTaskAccountPermissions(page);
         if (kind === 'signature') {
           check('Signed content names MUSD invoice creation', /MUSD Pay Links|create invoice/i.test(text));
         }
@@ -539,7 +591,7 @@ async function confirmationPump() {
   }
 }
 async function connectedAccount(expected) {
-  const accounts = await providerRequest('eth_requestAccounts');
+  const accounts = await providerRequest('eth_accounts');
   check('Dapp sees the expected task-only selected account', Array.isArray(accounts) && accounts[0]?.toLowerCase() === expected.toLowerCase(), { selected: Array.isArray(accounts) ? accounts[0] : null });
 }
 
@@ -690,32 +742,35 @@ try {
   await importWallet(mnemonic, password);
   mnemonic = undefined;
   await chooseAccount('Account 2', { create: true });
+  await recordExtensionTargets('after-wallet-onboarding-and-account-selection');
   app = await context.newPage();
   await app.goto(ORIGIN, { waitUntil: 'domcontentloaded' });
   await app.waitForFunction(() => Boolean(window.ethereum?.isMetaMask));
   check('Dapp uses real MetaMask injection', await app.evaluate(() => window.ethereum.isMetaMask === true));
   pumpRunning = true;
   pumpPromise = confirmationPump();
-  await setStage('connect-merchant');
-  await connectedAccount(merchant);
-  const chainBefore = await providerRequest('eth_chainId');
-  evidence.wallet.chainBeforePayment = chainBefore;
   await setStage('create-signed-invoice');
   await app.locator('#m-chain').selectOption(String(CHAIN_ID));
   await app.locator('#m-to').fill(merchant);
   await app.locator('#m-amount').fill(amountText);
+  await app.bringToFront();
+  await recordExtensionTargets('before-product-create-invoice-gesture');
   const invoiceResponse = app.waitForResponse((r) => new URL(r.url()).pathname === '/api/invoices' && r.request().method() === 'POST', { timeout: 90_000 });
+  invoiceResponse.catch(() => {}); // A preceding UI failure must not leave an unhandled response waiter.
+  evidence.wallet.connectionGesture = 'Normal product Create invoice button; harness issues no connection request';
   await checkpoint('merchant-invoice-ui-submit');
   await app.locator('#m-go').click();
-  const createdResponse = await invoiceResponse;
+  const createdResponse = await bounded(() => invoiceResponse, 90_000, { watchPump: true });
   const created = await createdResponse.json();
   check('Invoice was created by the normal merchant UI', createdResponse.status() === 201 && created.ok === true && created.invoice?.signed === true);
   check('Invoice binds expected testnet recipient and amount', created.invoice.chainId === CHAIN_ID && created.invoice.to.toLowerCase() === merchant.toLowerCase() && created.invoice.units === amount.toString());
   check('MetaMask approved one invoice signature', signatureApprovals === 1);
   evidence.invoice = created.invoice;
+  await connectedAccount(merchant); // Read-only observation after the product's normal connection/signature.
+  evidence.wallet.chainBeforePayment = await providerRequest('eth_chainId');
   await appShot('01-signed-invoice');
   await chooseAccount('Account 1');
-  await connectedAccount(payer);
+  await connectedAccount(payer); // Both task accounts were permitted through the actual Connect UI.
   const payURL = new URL(created.invoice.payUrl);
   check('Invoice pay page stays within the local preview', payURL.origin === new URL(ORIGIN).origin);
   await verifyMissingWebLocks(client, payer, payURL, created.invoice.memo);
@@ -725,6 +780,8 @@ try {
   const nonceBefore = await client.getTransactionCount({ address: payer, blockTag: 'pending' });
   await setStage('reject-one-payment');
   confirmMode = 'reject-once';
+  await app.bringToFront();
+  await recordExtensionTargets('before-product-payer-gesture');
   await checkpoint('rejected-payment-ui-request');
   await app.locator('#pv-pay').click();
   await waitFor(async () => transactionRejections === 1 && /rejected/i.test(await app.locator('#pv-out').innerText()), 90_000);
@@ -742,6 +799,7 @@ try {
   evidence.prePayment = { at: new Date().toISOString(), pendingNonce: preNonce, block: preBlock.toString(), nativeBalance: preNative.toString(), musdBalance: preToken.toString(), invoiceReference: created.invoice.memo };
   await persistEvidence();
   confirmMode = 'pay-once';
+  await app.bringToFront();
   await checkpoint('payment-ui-request');
   await app.locator('#pv-pay').click();
   const hash = await waitFor(async () => {
@@ -818,6 +876,7 @@ try {
   await persistEvidence(); // Counters and approval journal survive every handled failure.
   if (pumpPromise) await Promise.race([pumpPromise.catch(() => {}), sleep(5_000)]);
   if (context && evidence.status !== 'passed') {
+    if (wallet && !wallet.isClosed()) await recordExtensionTargets('failure');
     evidence.extensionPages = await Promise.all(context.pages().filter(isExtensionPage).map(pageMetadata));
   }
   if (transactionApprovals > 0 && !evidence.payment?.hash) {
