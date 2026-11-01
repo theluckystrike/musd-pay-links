@@ -1,5 +1,6 @@
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { canonicalBlock, minedReceipt, minedTransaction } from "./chain-fixtures.ts";
 
 import { acceptMessage, checkAcceptSignature, checkInvoiceSignature, invoiceMessage, SIGNATURE_MAX_AGE_SECONDS, type InvoiceClaim } from "../src/auth.ts";
 import { MEZO_TESTNET } from "../src/chains.ts";
@@ -37,22 +38,21 @@ const pad = (a: string) => "0x" + a.toLowerCase().slice(2).padStart(64, "0");
 /** A fake chain with one MUSD transfer to `recipient` and no reference in the transaction input. */
 function acceptChain(recipient: string, units: bigint, memo: string | null = null, block = HEAD - 10) {
   return async (_url: string, init?: RequestInit) => {
-    const { method } = JSON.parse(String(init!.body)) as { method: string };
-    let result: unknown = null;
-    if (method === "eth_getTransactionReceipt") {
-      result = {
-        status: "0x1",
-        from: PAYER,
-        blockNumber: "0x" + block.toString(16),
-        to: MEZO_TESTNET.musd,
-        logs: [{ address: MEZO_TESTNET.musd, topics: [TRANSFER_TOPIC, pad(PAYER), pad(recipient)], data: "0x" + units.toString(16) }],
-      };
-    } else if (method === "eth_getTransactionByHash") {
-      result = { input: buildTransferData(recipient as `0x${string}`, units, memo), to: MEZO_TESTNET.musd };
-    } else if (method === "eth_blockNumber") {
-      result = "0x" + HEAD.toString(16);
-    }
-    return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result }));
+    const body = JSON.parse(String(init!.body));
+    const answer = ({ id, method, params }: { id: number; method: string; params: unknown[] }) => {
+      let result: unknown = null;
+      if (method === "eth_getTransactionReceipt") {
+        result = {
+          ...minedReceipt(TX, block), status: "0x1", from: PAYER, to: MEZO_TESTNET.musd,
+          logs: [{ address: MEZO_TESTNET.musd, topics: [TRANSFER_TOPIC, pad(PAYER), pad(recipient)], data: "0x" + units.toString(16) }],
+        };
+      } else if (method === "eth_getTransactionByHash") {
+        result = { ...minedTransaction(TX, block), input: buildTransferData(recipient as `0x${string}`, units, memo), to: MEZO_TESTNET.musd };
+      } else if (method === "eth_blockNumber") result = "0x" + HEAD.toString(16);
+      else if (method === "eth_getBlockByNumber") result = canonicalBlock(Number(params[0]));
+      return { jsonrpc: "2.0", id, result };
+    };
+    return new Response(JSON.stringify(Array.isArray(body) ? body.map(answer) : answer(body)));
   };
 }
 

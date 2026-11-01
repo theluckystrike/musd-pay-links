@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { canonicalBlock, minedReceipt, minedTransaction } from "./chain-fixtures.ts";
 
 import { CONFIRMATIONS_REQUIRED, MEZO_TESTNET } from "../src/chains.ts";
 import { buildTransferData } from "../src/guard.ts";
@@ -25,21 +26,22 @@ function memKV(): KV & { data: Map<string, string> } {
 function chainWith(pays: { tx: string; block: number; units: bigint; memo: string | null }[], head = HEAD): Fetch {
   const one = (method: string, params: unknown[]) => {
     if (method === "eth_blockNumber") return "0x" + head.toString(16);
+    if (method === "eth_getBlockByNumber") return canonicalBlock(Number(params[0]));
     if (method === "eth_getTransactionReceipt") {
       const p = pays.find((x) => x.tx === params[0]);
       return p
-        ? { status: "0x1", from: PAYER, blockNumber: "0x" + p.block.toString(16), to: MEZO_TESTNET.musd, logs: [{ address: MEZO_TESTNET.musd, topics: [TRANSFER_TOPIC, pad(PAYER), pad(SHOP)], data: "0x" + p.units.toString(16) }] }
+        ? { ...minedReceipt(p.tx, p.block), status: "0x1", from: PAYER, to: MEZO_TESTNET.musd, logs: [{ address: MEZO_TESTNET.musd, topics: [TRANSFER_TOPIC, pad(PAYER), pad(SHOP)], data: "0x" + p.units.toString(16) }] }
         : null;
     }
     if (method === "eth_getLogs") {
       const q = params[0] as { fromBlock: string; toBlock: string };
       return pays
         .filter((p) => p.block >= Number(q.fromBlock) && p.block <= Number(q.toBlock))
-        .map((p) => ({ transactionHash: p.tx, blockNumber: "0x" + p.block.toString(16), topics: [TRANSFER_TOPIC, pad(PAYER), pad(SHOP)], data: "0x" + p.units.toString(16) }));
+        .map((p) => ({ ...minedReceipt(p.tx, p.block), removed: false, topics: [TRANSFER_TOPIC, pad(PAYER), pad(SHOP)], data: "0x" + p.units.toString(16) }));
     }
     if (method === "eth_getTransactionByHash") {
       const p = pays.find((x) => x.tx === params[0]);
-      return p ? { input: buildTransferData(SHOP, p.units, p.memo), to: MEZO_TESTNET.musd } : null;
+      return p ? { ...minedTransaction(p.tx, p.block), input: buildTransferData(SHOP, p.units, p.memo), to: MEZO_TESTNET.musd } : null;
     }
     return null;
   };
@@ -147,6 +149,29 @@ describe("invoices", () => {
     expect(checked.status).toBe("unavailable");
     expect(payPageLock({ invoice: r.invoice, status: checked.status, checked: true })).toBe("unavailable");
     expect((await getInvoice(kv, MEZO_TESTNET.id, r.invoice.memo))!.paid).toBeUndefined();
+  });
+
+  it("does not record an orphaned log and transaction as a paid invoice", async () => {
+    const kv = memKV();
+    const r = await createInvoice(kv, MEZO_TESTNET, { to: SHOP, amount: "5", memo: "INV-ORPHAN" }, HEAD - 100);
+    if (!r.ok) throw new Error("expected ok");
+    const base = chainWith([{ tx: h(61), block: HEAD - 5, units: 5n * E, memo: "INV-ORPHAN" }]);
+    const f: Fetch = async (url, init) => {
+      const query = JSON.parse(String(init!.body));
+      const response = await base(url, init);
+      const body = await response.json();
+      for (const reply of Array.isArray(body) ? body : [body]) {
+        const method = Array.isArray(query) ? query.find((item: { id: number }) => item.id === reply.id).method : query.method;
+        if (method === "eth_getLogs") reply.result = reply.result.map((log: object) => ({ ...log, blockHash: "0x" + "ef".repeat(32) }));
+        if (method === "eth_getTransactionByHash" && reply.result) reply.result.blockHash = "0x" + "ef".repeat(32);
+      }
+      return new Response(JSON.stringify(body));
+    };
+    const checked = await checkInvoice(kv, MEZO_TESTNET, r.invoice, f);
+    expect(checked.status).toBe("unavailable");
+    expect(payPageLock({ invoice: r.invoice, status: checked.status, checked: true })).toBe("unavailable");
+    expect((await getInvoice(kv, MEZO_TESTNET.id, r.invoice.memo))!.paid).toBeUndefined();
+    expect(kv.data.has(`tx:31611:${h(61)}`)).toBe(false);
   });
 });
 

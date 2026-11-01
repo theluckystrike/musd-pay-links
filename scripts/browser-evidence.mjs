@@ -376,6 +376,15 @@ try {
 } catch (error) {
   evidence.failedAt = new Date().toISOString();
   evidence.failure = { stage, type: error?.constructor?.name ?? 'Error' };
+  if (!walletReady && wallet && !wallet.isClosed()) {
+    evidence.onboardingDiagnostic = {
+      route: new URL(wallet.url()).hash,
+      // Identifiers and element kinds only: never text, labels or values from a recovery form.
+      elements: await wallet.locator('[data-testid]').evaluateAll((nodes) => nodes
+        .filter((node) => /^(?:parent-selector-onboarding|onboarding-|import-srp|srp-input-import|create-password|passkey-|metametrics|download-app)/.test(node.getAttribute('data-testid') ?? ''))
+        .slice(0, 70).map((node) => ({ id: node.getAttribute('data-testid'), tag: node.tagName, type: node.getAttribute('type') }))).catch(() => []),
+    };
+  }
   // Do not emit Playwright error/stack or locator call logs: onboarding calls contain secret input.
   console.error(`Browser evidence incomplete at public stage ${stage}. No raw wallet error is emitted.`);
   if (walletReady) await appShot('failure-app').catch(() => {});

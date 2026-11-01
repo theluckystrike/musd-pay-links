@@ -112,10 +112,13 @@ export async function connectPaymentWallet(provider: Eip1193, chain: MezoChain):
     account, chain, assertReady, close,
     async send(tx, beforeRequest) {
       if (requested) throw new Error("A payment was already requested in this wallet session. Check its result before any retry.");
-      if (tx.chainId !== chain.id || typeof tx.to !== "string" || tx.to.toLowerCase() !== chain.musd.toLowerCase() || tx.value !== 0n) {
+      // Callers retain their object while the wallet reads are awaited. Only these copied primitive
+      // values are checked and sent, so later edits or a beforeRequest callback cannot replace them.
+      const checked = Object.freeze({ chainId: tx.chainId, to: tx.to, value: tx.value, data: tx.data });
+      if (checked.chainId !== chain.id || typeof checked.to !== "string" || checked.to.toLowerCase() !== chain.musd.toLowerCase() || checked.value !== 0n) {
         throw new Error("The prepared transfer does not match the selected MUSD network. No payment was requested.");
       }
-      if (!isMusdTransferData(tx.data)) throw new Error("The prepared request is not a valid MUSD transfer. No payment was requested.");
+      if (!isMusdTransferData(checked.data)) throw new Error("The prepared request is not a valid MUSD transfer. No payment was requested.");
       // Reserve the session before the awaited read, so two concurrent callers cannot both send.
       requested = true;
       try {
@@ -128,7 +131,7 @@ export async function connectPaymentWallet(provider: Eip1193, chain: MezoChain):
       try {
         const hash = await provider.request({
           method: "eth_sendTransaction",
-          params: [{ from: account, chainId, to: tx.to, value: "0x0", data: tx.data }],
+          params: [{ from: account, chainId, to: checked.to, value: "0x0", data: checked.data }],
         });
         if (!isTransactionHash(hash)) return { status: "unknown", message: "The wallet did not return a valid transaction hash. Check its activity before any retry." };
         return { status: "sent", hash };

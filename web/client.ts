@@ -12,6 +12,7 @@ import { payPageLock } from "../src/paystate.ts";
 import { MERCHANT_ELEMENT_IDS, payerMaxAmount, payerStatus, payerSummary } from "../src/payerview.ts";
 import { newReference } from "../src/invoices.ts";
 import { qrSvg } from "../src/qr.ts";
+import { initBorrowWallet } from "./borrow-client.ts";
 import { connectPaymentWallet, type Eip1193, type WalletSession } from "../src/wallet.ts";
 import { clearFailedWalletAttempt, clearRejectedAttempt, markWalletAttemptUnknown, readWalletAttempt, recordWalletHash, writeWalletAttempt, type AttemptStorage, type WalletAttempt } from "../src/wallet-state.ts";
 
@@ -696,7 +697,13 @@ async function payWithWallet(): Promise<void> {
   try {
     // Web Locks coordinates tabs of this origin while a wallet prompt is open. The saved attempt then
     // keeps reloads and later tabs locked. Different browsers can still race; the chain remains final.
-    if (invoice && navigator.locks?.request) {
+    if (invoice) {
+      if (!navigator.locks?.request) {
+        payLock = "This browser cannot coordinate invoice payments across tabs. Use a browser with Web Locks support.";
+        setPayerStatus(payLock);
+        status(`${esc(payLock)} No payment was requested.`);
+        return;
+      }
       await navigator.locks.request(`musd-pay:${invoice.chainId}:${invoice.memo}`, { mode: "exclusive", ifAvailable: true }, async (lock) => {
         if (!lock) {
           payLock = "Another tab is preparing a payment for this invoice. Check that tab before retrying.";
@@ -922,6 +929,7 @@ async function loadLive(): Promise<void> {
 }
 
 function init(): void {
+  initBorrowWallet();
   const chips = $("p-examples");
   for (const [name, link] of EXAMPLES) {
     const b = document.createElement("button");

@@ -24,12 +24,16 @@ const TERMS: BorrowTerms = {
 };
 
 describe("quoteBorrow", () => {
-  it("lifts a small need to the protocol minimum and adds the fee and gas compensation", () => {
+  it("mints the smallest amount whose actual fee-inclusive debt meets the protocol minimum", () => {
     const q = quoteBorrow(TERMS, 25n * E);
-    expect(q.borrow).toBe(1800n * E);
-    expect(q.fee).toBe((18n * E) / 10n); // 0.1 percent of 1,800
-    expect(q.totalDebt).toBe(2001n * E + (8n * E) / 10n); // 1,800 + 1.8 + 200, as in testnet openTrove transactions
-    expect(q.notes.join(" ")).toContain("1775 MUSD more than the link asks for");
+    expect(q.borrow).toBe(1_798_201_798_201_798_201_799n);
+    expect(q.borrow + q.fee).toBe(1800n * E);
+    const previous = q.borrow - 1n;
+    expect(previous + previous * TERMS.borrowingRate / E).toBeLessThan(1800n * E);
+    expect(q.totalDebt).toBe(2000n * E);
+    expect(q.notes.join(" ")).toContain("including the borrowing fee");
+    expect(q.notes.join(" ")).toContain("not your wallet");
+    expect(q.notes.join(" ")).not.toContain("comes back");
   });
 
   it("keeps a need above the minimum as it is", () => {
@@ -64,7 +68,29 @@ describe("quoteBorrow", () => {
   });
 
   it("computes about one year of interest on the borrowed amount and fee", () => {
-    expect(quoteBorrow(TERMS, 25n * E).yearlyInterest).toBe(((1800n * E + (18n * E) / 10n) * 100n) / 10_000n);
+    expect(quoteBorrow(TERMS, 25n * E).yearlyInterest).toBe(18n * E);
+  });
+
+  it("applies no fee in recovery mode or for the queried exempt borrower", () => {
+    for (const rules of [{ ...TERMS, recoveryMode: true }, { ...TERMS, feeExempt: true }]) {
+      const q = quoteBorrow(rules, 25n * E);
+      expect(q.borrow).toBe(1800n * E);
+      expect(q.fee).toBe(0n);
+      expect(q.totalDebt).toBe(2000n * E);
+    }
+  });
+
+  it("does not borrow extra when requested amount plus fee already meets the minimum", () => {
+    const q = quoteBorrow(TERMS, 1799n * E);
+    expect(q.borrow).toBe(1799n * E);
+    expect(q.fee).toBe(1_799_000_000_000_000_000n);
+    expect(q.borrow + q.fee).toBeGreaterThanOrEqual(TERMS.minNetDebt);
+  });
+
+  it("rejects malformed pure quote inputs before collateral division", () => {
+    expect(() => quoteBorrow({ ...TERMS, price: 0n }, E)).toThrow("Invalid borrowing terms");
+    expect(() => quoteBorrow({ ...TERMS, minNetDebt: 0n }, E)).toThrow("Invalid borrowing terms");
+    expect(() => quoteBorrow({ ...TERMS, borrowingRate: E + 1n }, E)).toThrow("Invalid borrowing terms");
   });
 
   it("refuses a zero need", () => {
@@ -89,14 +115,21 @@ describe("readBorrowTerms", () => {
     "function getTCR(uint256) view returns (uint256)",
     "function checkRecoveryMode(uint256) view returns (bool)",
     "function getTroveOwnersCount() view returns (uint256)",
+    "function governableVariables() view returns (address)",
+    "function isAccountFeeExempt(address) view returns (bool)",
   ]);
   const u = (n: bigint) => encodeAbiParameters([{ type: "uint256" }], [n]);
-  function protocol(overrides: Partial<Record<string, string>> = {}, seen: { to: string; fn: string }[] = []): Fetch {
+  const BLOCK_HASH = `0x${"12".repeat(32)}`;
+  function protocol(overrides: Partial<Record<string, string>> = {}, seen: { to: string; fn: string; block: string }[] = []): Fetch {
     return async (_url, init) => {
-      const { params } = JSON.parse(String(init!.body)) as { params: [{ to: string; data: `0x${string}` }] };
-      const { to, data } = params[0];
+      const { method, params } = JSON.parse(String(init!.body));
+      const response = (result: unknown) => new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result }));
+      if (method === "eth_chainId") return response(overrides.chainId ?? "0x7b7b");
+      if (method === "eth_blockNumber") return response("0x3e8");
+      if (method === "eth_getBlockByNumber") return response({ number: "0x3e8", hash: overrides.blockHash ?? BLOCK_HASH, timestamp: "0x6b000000" });
+      const { to, data } = params[0] as { to: string; data: `0x${string}` };
       const fn = decodeFunctionData({ abi, data }).functionName;
-      seen.push({ to, fn });
+      seen.push({ to, fn, block: params[1] });
       const answers: Record<string, string> = {
         fetchPrice: u(TERMS.price),
         MCR: u(TERMS.mcr),
@@ -108,21 +141,24 @@ describe("readBorrowTerms", () => {
         getTCR: u(TERMS.tcr),
         checkRecoveryMode: encodeAbiParameters([{ type: "bool" }], [false]),
         getTroveOwnersCount: u(330n),
+        governableVariables: encodeAbiParameters([{ type: "address" }], ["0x6552059b6efc6aa4ae3ea45f28ed4d92ace020cd"]),
+        isAccountFeeExempt: encodeAbiParameters([{ type: "bool" }], [true]),
         ...overrides,
       };
-      return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: answers[fn] }));
+      return response(answers[fn]);
     };
   }
 
   it("reads every rule from the right protocol contract", async () => {
-    const seen: { to: string; fn: string }[] = [];
-    expect(await readBorrowTerms(MEZO_TESTNET, protocol({}, seen))).toEqual(TERMS);
+    const seen: { to: string; fn: string; block: string }[] = [];
+    expect(await readBorrowTerms(MEZO_TESTNET, protocol({}, seen))).toMatchObject({ ...TERMS, snapshot: { block: 1000, hash: BLOCK_HASH } });
     const s = MEZO_TESTNET.system;
     const where = Object.fromEntries(seen.map((x) => [x.fn, x.to]));
     expect(where.fetchPrice).toBe(s.priceFeed);
     expect(where.minNetDebt).toBe(s.borrowerOperations);
     expect(where.interestRate).toBe(s.interestRateManager);
     expect(where.getTCR).toBe(s.troveManager);
+    expect(seen.every((call) => call.block === "0x3e8")).toBe(true);
   });
 
   it("refuses a zero price and impossible ratios", async () => {
@@ -133,6 +169,30 @@ describe("readBorrowTerms", () => {
   it("uses distinct protocol contracts on testnet and mainnet", () => {
     expect(MEZO_TESTNET.system.borrowerOperations).not.toBe(MEZO_MAINNET.system.borrowerOperations);
     expect(MEZO_TESTNET.system.priceFeed).not.toBe(MEZO_MAINNET.system.priceFeed);
+  });
+
+  it("queries fee exemption for the exact borrower", async () => {
+    const account = "0x1111111111111111111111111111111111111111";
+    const t = await readBorrowTerms(MEZO_TESTNET, protocol(), { account });
+    expect(t.borrower).toBe(account);
+    expect(t.feeExempt).toBe(true);
+    expect(quoteBorrow(t, E).fee).toBe(0n);
+  });
+
+  it("refuses a wrong RPC chain or contradictory recovery rules", async () => {
+    await expect(readBorrowTerms(MEZO_TESTNET, protocol({ chainId: "0x7b7c" }))).rejects.toThrow("wrong chain");
+    await expect(readBorrowTerms(MEZO_TESTNET, protocol({ checkRecoveryMode: encodeAbiParameters([{ type: "bool" }], [true]) }))).rejects.toThrow("Inconsistent recovery mode");
+  });
+
+  it("rejects a block that changes while contract values are read", async () => {
+    const base = protocol();
+    let headers = 0;
+    const changed: Fetch = async (url, init) => {
+      const request = JSON.parse(String(init!.body));
+      if (request.method === "eth_getBlockByNumber" && ++headers > 1) return new Response(JSON.stringify({ result: { hash: `0x${"34".repeat(32)}` } }));
+      return base(url, init);
+    };
+    await expect(readBorrowTerms(MEZO_TESTNET, changed)).rejects.toThrow("snapshot changed");
   });
 });
 

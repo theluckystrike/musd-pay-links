@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { canonicalBlock, minedReceipt, minedTransaction } from "./chain-fixtures.ts";
 
 import { MEZO_TESTNET } from "../src/chains.ts";
 import { claimsFor, InvoiceStoreDO, type InvoiceClaims } from "../src/claims.ts";
@@ -76,19 +77,20 @@ function fakeStore(): { claims: InvoiceClaims; storage: FakeStorage } {
 function chainWith(pay: { tx: string; block: number; units: bigint; memo: string | null }, head = HEAD): Fetch {
   const one = (method: string, params: unknown[]) => {
     if (method === "eth_blockNumber") return "0x" + head.toString(16);
+    if (method === "eth_getBlockByNumber") return canonicalBlock(Number(params[0]));
     if (method === "eth_getTransactionReceipt") {
       return params[0] === pay.tx
-        ? { status: "0x1", from: PAYER, blockNumber: "0x" + pay.block.toString(16), to: MEZO_TESTNET.musd, logs: [{ address: MEZO_TESTNET.musd, topics: [TRANSFER_TOPIC, pad(PAYER), pad(SHOP)], data: "0x" + pay.units.toString(16) }] }
+        ? { ...minedReceipt(pay.tx, pay.block), status: "0x1", from: PAYER, to: MEZO_TESTNET.musd, logs: [{ address: MEZO_TESTNET.musd, topics: [TRANSFER_TOPIC, pad(PAYER), pad(SHOP)], data: "0x" + pay.units.toString(16) }] }
         : null;
     }
     if (method === "eth_getLogs") {
       const q = params[0] as { fromBlock: string; toBlock: string };
       return pay.block >= Number(q.fromBlock) && pay.block <= Number(q.toBlock)
-        ? [{ transactionHash: pay.tx, blockNumber: "0x" + pay.block.toString(16), topics: [TRANSFER_TOPIC, pad(PAYER), pad(SHOP)], data: "0x" + pay.units.toString(16) }]
+        ? [{ ...minedReceipt(pay.tx, pay.block), removed: false, topics: [TRANSFER_TOPIC, pad(PAYER), pad(SHOP)], data: "0x" + pay.units.toString(16) }]
         : [];
     }
     if (method === "eth_getTransactionByHash") {
-      return params[0] === pay.tx ? { input: buildTransferData(SHOP, pay.units, pay.memo), to: MEZO_TESTNET.musd } : null;
+      return params[0] === pay.tx ? { ...minedTransaction(pay.tx, pay.block), input: buildTransferData(SHOP, pay.units, pay.memo), to: MEZO_TESTNET.musd } : null;
     }
     return null;
   };

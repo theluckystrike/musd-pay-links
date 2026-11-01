@@ -50,18 +50,25 @@ jobs:
       - name: Build the local preview
         run: pnpm build
       - name: Start an isolated local Worker
+        id: worker
         run: |
           set -euo pipefail
           mkdir -p .reports/browser
           setsid pnpm exec wrangler dev --local --ip 127.0.0.1 --port 8787 > "$RUNNER_TEMP/musd-worker.log" 2>&1 &
-          echo $! > "$RUNNER_TEMP/musd-worker.pid"
+          worker_pid=$!
+          echo "$worker_pid" > "$RUNNER_TEMP/musd-worker.pid"
           for attempt in $(seq 1 60); do
+            if ! kill -0 "$worker_pid" 2>/dev/null; then
+              echo 'Local Worker process stopped before becoming ready. See the retained server log.'
+              exit 1
+            fi
             if curl --fail --silent --max-time 2 http://127.0.0.1:8787/ > /dev/null; then exit 0; fi
             sleep 1
           done
           echo 'Local Worker did not become ready.'
           exit 1
       - name: Use the actual MetaMask UI and prove a testnet invoice payment
+        id: browser
         env:
           MUSD_EVIDENCE_MNEMONIC: ${{ secrets.MUSD_EVIDENCE_MNEMONIC }}
           MUSD_EVIDENCE_PAYER_ADDRESS: ${{ vars.MUSD_EVIDENCE_PAYER_ADDRESS }}
@@ -81,6 +88,25 @@ jobs:
             mkdir -p .reports/browser
             cp "$RUNNER_TEMP/musd-worker.log" .reports/browser/server.log
           fi
+      - name: Record exact runner step outcomes
+        if: always()
+        env:
+          WORKER_STEP_OUTCOME: ${{ steps.worker.outcome }}
+          BROWSER_STEP_OUTCOME: ${{ steps.browser.outcome }}
+        run: |
+          mkdir -p .reports/browser
+          node --input-type=module <<'JS'
+          import { writeFile } from 'node:fs/promises';
+          const record = {
+            recordedAt: new Date().toISOString(),
+            commit: process.env.GITHUB_SHA,
+            runId: process.env.GITHUB_RUN_ID,
+            workerStepOutcome: process.env.WORKER_STEP_OUTCOME || 'not-started',
+            browserStepOutcome: process.env.BROWSER_STEP_OUTCOME || 'not-started',
+            limit: 'A started or successful workflow step alone does not prove a wallet payment. Require browser-evidence.json and its on-chain receipt checks.',
+          };
+          await writeFile('.reports/browser/workflow-run.json', JSON.stringify(record, null, 2) + '\n');
+          JS
       - name: Upload public test evidence only
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

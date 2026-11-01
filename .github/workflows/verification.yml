@@ -38,6 +38,8 @@ jobs:
         run: pnpm typecheck
       - name: Build browser client
         run: pnpm build
+      - name: Start the actual Worker runtime and verify local routes
+        run: pnpm test:runtime
       - name: Read-only live RPC tests
         id: live
         if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}

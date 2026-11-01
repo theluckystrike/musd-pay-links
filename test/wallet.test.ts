@@ -132,6 +132,43 @@ describe("payment wallet network and account binding", () => {
     session.close();
   });
 
+  it("sends the checked snapshot when a caller mutates its object during a deferred wallet read", async () => {
+    const provider = new Provider();
+    const session = await connectPaymentWallet(provider, MEZO_TESTNET);
+    const tx = transfer();
+    const original = { ...tx };
+    const request = provider.request.bind(provider);
+    let resume!: () => void;
+    let started!: () => void;
+    const gate = new Promise<void>((resolve) => { resume = resolve; });
+    const reading = new Promise<void>((resolve) => { started = resolve; });
+    provider.request = async (args) => {
+      if (args.method === "eth_chainId") { started(); await gate; }
+      return request(args);
+    };
+    const sent = session.send(tx);
+    await reading;
+    // A retained JavaScript object can change after validation but before the awaited read ends.
+    Object.assign(tx, { chainId: 1, to: OTHER, value: 1n, data: "0x095ea7b3" + original.data.slice(10) });
+    resume();
+    expect(await sent).toMatchObject({ status: "sent" });
+    expect(provider.calls.filter((call) => call.method === "eth_sendTransaction").map((call) => call.params))
+      .toEqual([[{ from: ACCOUNT, chainId: CHAIN, to: original.to, value: "0x0", data: original.data }]]);
+    session.close();
+  });
+
+  it("does not let the beforeRequest callback replace the checked transfer", async () => {
+    const provider = new Provider();
+    const session = await connectPaymentWallet(provider, MEZO_TESTNET);
+    const tx = transfer();
+    const original = { ...tx };
+    expect(await session.send(tx, () => { Object.assign(tx, { to: OTHER, data: "0x095ea7b3" + original.data.slice(10) }); }))
+      .toMatchObject({ status: "sent" });
+    expect(provider.calls.filter((call) => call.method === "eth_sendTransaction").map((call) => call.params))
+      .toEqual([[{ from: ACCOUNT, chainId: CHAIN, to: original.to, value: "0x0", data: original.data }]]);
+    session.close();
+  });
+
   const invalidData: [string, unknown][] = [
     ["approve", "0x095ea7b3" + transfer().data.slice(10)],
     ["another method", "0x12345678" + transfer().data.slice(10)],

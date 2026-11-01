@@ -191,7 +191,7 @@ footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
 
     <section class="panel wide" id="b-panel" aria-labelledby="b-h">
       <h2 id="b-h">4. Payer, get MUSD with BTC (live MUSD protocol)</h2>
-      <p class="sub">MUSD is minted against BTC. This quote reads the live rules from the MUSD protocol contracts on Mezo (BorrowerOperations, TroveManager, PriceFeed and InterestRateManager). It shows the BTC to lock, the fee, the protocol minimum and the liquidation price. Nothing is signed here. The borrow itself happens in the Mezo app.</p>
+      <p class="sub">MUSD is minted against BTC. This quote reads the live rules from the MUSD protocol contracts on Mezo (BorrowerOperations, TroveManager, PriceFeed and InterestRateManager). It shows the BTC to lock, the fee, the protocol minimum and the liquidation price. On testnet, you can review and open one loan here. Mainnet borrowing stays in the Mezo app. A quote is not a transaction.</p>
       <div class="row">
         <div><label for="b-need">MUSD you need</label><input id="b-need" inputmode="decimal" value="25"></div>
         <div><label for="b-ratio">Collateral ratio in percent</label><input id="b-ratio" inputmode="decimal" value="200"></div>
@@ -199,6 +199,15 @@ footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
       </div>
       <div class="actions"><button id="b-go">Get the quote</button></div>
       <div class="out" id="b-out" aria-live="polite"></div>
+      <div id="b-direct" class="note" aria-labelledby="b-direct-h">
+        <h3 id="b-direct-h">Open a Mezo Testnet loan here</h3>
+        <p>Use test BTC only. The protocol minimum can create a debt much larger than a small invoice. Review the complete loan before you approve it.</p>
+        <label for="b-collateral">Test BTC to lock (leave empty to use the quote’s required collateral)</label>
+        <input id="b-collateral" inputmode="decimal" placeholder="For example 0.06" autocomplete="off">
+        <div class="actions"><button id="b-review">Connect wallet and review loan</button><button id="b-open" disabled>Open testnet loan</button><button id="b-loan-check" hidden>Check loan result</button></div>
+        <p id="b-wallet-status" aria-live="polite">Reviewing a loan sends no transaction.</p>
+        <div id="b-loan-review" aria-live="polite"></div>
+      </div>
     </section>
   </div>
 

@@ -1,5 +1,5 @@
 name = "musd-pay-links"
-main = "src/worker.ts"
+main = "src/runtime.ts"
 compatibility_date = "2026-09-01"
 workers_dev = true
 

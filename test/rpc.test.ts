@@ -1,14 +1,17 @@
 import { encodeAbiParameters } from "viem";
 import { beforeAll, describe, expect, it } from "vitest";
+import { canonicalBlock, canonicalBlockHash, minedReceipt, minedTransaction } from "./chain-fixtures.ts";
 
 import { MEZO_MAINNET, MEZO_TESTNET } from "../src/chains.ts";
 import { buildTransferData } from "../src/guard.ts";
 import {
   findDuplicatePayments,
   findPayments,
+  rpc,
   rpcBatch,
   LOG_CHUNK,
   MAX_LOOKBACK,
+  PAYMENT_SCAN_REQUEST_LIMIT,
   memoFromInput,
   NETWORK_UNAVAILABLE_MESSAGE,
   readBalance,
@@ -29,15 +32,36 @@ const pad = (a: string) => "0x" + a.toLowerCase().slice(2).padStart(64, "0");
 
 function mockRpc(handlers: Record<string, (params: unknown[]) => unknown>): Fetch {
   return async (_url, init) => {
-    const { method, params } = JSON.parse(String(init!.body)) as { method: string; params: unknown[] };
-    const h = handlers[method];
-    if (!h) return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, error: { message: "no " + method } }));
-    return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: h(params) }));
+    const body = JSON.parse(String(init!.body));
+    const answer = ({ method, params, id }: { method: string; params: unknown[]; id: number }) => {
+      const h = handlers[method];
+      if (!h) return { jsonrpc: "2.0", id, error: { message: "no " + method } };
+      const result = h(params);
+      // Ordinary fixtures represent mined transactions. Explicit overrides can still model bad data.
+      const value = method === "eth_getTransactionByHash" && result && typeof result === "object"
+        ? { ...minedTransaction(HASH, 100), ...result } : result;
+      return { jsonrpc: "2.0", id, result: value };
+    };
+    return new Response(JSON.stringify(Array.isArray(body) ? body.map(answer) : answer(body)));
+  };
+}
+
+function changeRpcResult(source: Fetch, change: (method: string, params: unknown[], result: unknown) => unknown): Fetch {
+  return async (url, init) => {
+    const request = JSON.parse(String(init!.body));
+    const response = await source(url, init);
+    const body = await response.json() as { id: number; result?: unknown } | { id: number; result?: unknown }[];
+    const edit = (reply: { id: number; result?: unknown }) => {
+      const query = Array.isArray(request) ? request.find((entry: { id: number }) => entry.id === reply.id) : request;
+      return { ...reply, result: change(query.method, query.params, reply.result) };
+    };
+    return new Response(JSON.stringify(Array.isArray(body) ? body.map(edit) : edit(body)), { status: response.status });
   };
 }
 
 function receipt(logs: { address: string; to: string; value: bigint }[], status = "0x1") {
   return {
+    ...minedReceipt(HASH, 100),
     status,
     blockNumber: "0x64",
     to: MEZO_TESTNET.musd,
@@ -47,6 +71,7 @@ function receipt(logs: { address: string; to: string; value: bigint }[], status 
 
 const base = {
   eth_blockNumber: () => "0x6d",
+  eth_getBlockByNumber: (params: unknown[]) => canonicalBlock(Number(params[0])),
   eth_getTransactionByHash: () => ({ input: "0xa9059cbb" + "00".repeat(64) + "494e562d31", to: MEZO_TESTNET.musd }),
 };
 
@@ -152,17 +177,14 @@ describe("verifyPayment", () => {
 
   it("falls back to the second documented mainnet endpoint when the first does not answer", async () => {
     const urls: string[] = [];
+    const working = mockRpc({ ...base,
+      eth_getTransactionReceipt: () => receipt([{ address: MEZO_MAINNET.musd, to: SHOP, value: 5n }]),
+      eth_getTransactionByHash: () => ({ input: "0x", to: MEZO_MAINNET.musd }),
+    });
     const f: Fetch = async (url, init) => {
       urls.push(url);
       if (url === MEZO_MAINNET.rpc) throw new Error("primary down");
-      const { method } = JSON.parse(String(init!.body)) as { method: string };
-      const result =
-        method === "eth_getTransactionReceipt"
-          ? receipt([{ address: MEZO_MAINNET.musd, to: SHOP, value: 5n }])
-          : method === "eth_getTransactionByHash"
-            ? { input: "0x", to: MEZO_MAINNET.musd }
-            : "0x6d";
-      return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result }));
+      return working(url, init);
     };
     expect(await verifyPayment(MEZO_MAINNET, { txHash: HASH, recipient: SHOP, amount: 5n }, f)).toMatchObject({ status: "paid" });
     expect(urls).toContain(MEZO_MAINNET.rpcFallback);
@@ -177,17 +199,16 @@ describe("verifyPayment", () => {
   });
 
   it("falls back to the second testnet endpoint when the first answers null for a mined receipt", async () => {
+    const working = mockRpc({ ...base,
+      eth_getTransactionReceipt: () => receipt([{ address: MEZO_TESTNET.musd, to: SHOP, value: 5n }]),
+      eth_getTransactionByHash: () => ({ input: "0x", to: MEZO_TESTNET.musd }),
+    });
     const f: Fetch = async (url, init) => {
-      const { method } = JSON.parse(String(init!.body)) as { method: string };
-      const lagging = url === MEZO_TESTNET.rpc && method !== "eth_blockNumber";
-      const result = lagging
-        ? null
-        : method === "eth_getTransactionReceipt"
-          ? receipt([{ address: MEZO_TESTNET.musd, to: SHOP, value: 5n }])
-          : method === "eth_getTransactionByHash"
-            ? { input: "0x", to: MEZO_TESTNET.musd }
-            : "0x6d";
-      return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result }));
+      const body = JSON.parse(String(init!.body));
+      if (!Array.isArray(body) && url === MEZO_TESTNET.rpc && ["eth_getTransactionReceipt", "eth_getTransactionByHash"].includes(body.method)) {
+        return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: null }));
+      }
+      return working(url, init);
     };
     expect(MEZO_TESTNET.rpcFallback).toBe("https://mezo-testnet.drpc.org");
     expect(await verifyPayment(MEZO_TESTNET, { txHash: HASH, recipient: SHOP, amount: 5n }, f)).toMatchObject({ status: "paid" });
@@ -237,6 +258,56 @@ describe("verifyPayment", () => {
     expect(await verifyPayment(MEZO_TESTNET, { txHash: HASH, recipient: SHOP, amount: 5n }, f))
       .toEqual({ status: "unavailable", message: NETWORK_UNAVAILABLE_MESSAGE });
   });
+
+  it.each([undefined, null, "0x2", "success", "0x00"])("does not mistake receipt status %s for a verified revert", async (status) => {
+    const f = mockRpc({
+      ...base,
+      eth_getTransactionReceipt: () => ({ ...receipt([]), status }),
+    });
+    expect(await verifyPayment(MEZO_TESTNET, { txHash: HASH, recipient: SHOP, amount: 5n }, f))
+      .toEqual({ status: "unavailable", message: NETWORK_UNAVAILABLE_MESSAGE });
+  });
+
+  it("keeps a shallow reverted transaction pending before the payer can retry", async () => {
+    const f = mockRpc({ ...base, eth_blockNumber: () => "0x64", eth_getTransactionReceipt: () => receipt([], "0x0") });
+    expect(await verifyPayment(MEZO_TESTNET, { txHash: HASH, recipient: SHOP, amount: 5n }, f))
+      .toEqual({ status: "pending", message: "The transaction reverted but has only 1 of 5 confirmations. Wait before any retry." });
+  });
+
+  it("does not accept a reverted receipt whose mined block is invalid", async () => {
+    const f = mockRpc({ ...base, eth_getTransactionReceipt: () => ({ ...receipt([], "0x0"), blockNumber: null }) });
+    expect(await verifyPayment(MEZO_TESTNET, { txHash: HASH, recipient: SHOP, amount: 5n }, f))
+      .toEqual({ status: "unavailable", message: NETWORK_UNAVAILABLE_MESSAGE });
+  });
+
+  it.each(["0x1", "0x0"])("does not finalize status%s from a receipt in an orphaned block", async (status) => {
+    const f = mockRpc({ ...base,
+      eth_getTransactionReceipt: () => ({ ...receipt([{ address: MEZO_TESTNET.musd, to: SHOP, value: 5n }], status), blockHash: "0x" + "ef".repeat(32) }),
+      eth_getTransactionByHash: () => ({ ...base.eth_getTransactionByHash(), blockHash: "0x" + "ef".repeat(32) }),
+    });
+    expect(await verifyPayment(MEZO_TESTNET, { txHash: HASH, recipient: SHOP, amount: 5n }, f))
+      .toEqual({ status: "unavailable", message: NETWORK_UNAVAILABLE_MESSAGE });
+  });
+
+  it("requires receipt, transaction and canonical header to agree on the mined block", async () => {
+    const source = mockRpc({ ...base, eth_getTransactionReceipt: () => receipt([{ address: MEZO_TESTNET.musd, to: SHOP, value: 5n }]) });
+    for (const change of [{ blockHash: undefined }, { blockHash: "0x" + "ef".repeat(32) }, { blockNumber: "0x65" }, { hash: "0x" + "cd".repeat(32) }]) {
+      const f = changeRpcResult(source, (method, _params, result) => method === "eth_getTransactionByHash" ? { ...(result as object), ...change } : result);
+      expect(await verifyPayment(MEZO_TESTNET, { txHash: HASH, recipient: SHOP, amount: 5n }, f)).toMatchObject({ status: "unavailable" });
+    }
+  });
+
+  it("keeps the result unavailable when the pinned head is reorganized during receipt checks", async () => {
+    let heads = 0;
+    const f = mockRpc({ ...base,
+      eth_getTransactionReceipt: () => receipt([{ address: MEZO_TESTNET.musd, to: SHOP, value: 5n }]),
+      eth_getBlockByNumber: (params) => {
+        const height = Number(params[0]);
+        return height === 109 && ++heads > 1 ? { ...canonicalBlock(height), hash: "0x" + "ef".repeat(32) } : canonicalBlock(height);
+      },
+    });
+    expect(await verifyPayment(MEZO_TESTNET, { txHash: HASH, recipient: SHOP, amount: 5n }, f)).toMatchObject({ status: "unavailable" });
+  });
 });
 
 describe("memoFromInput", () => {
@@ -258,19 +329,25 @@ describe("memoFromInput", () => {
 describe("findPayments", () => {
   const PAYER = "0x1111111111111111111111111111111111111111";
   const HEAD = 1_000_000;
-  type L = { tx: string; block: number; value: bigint; token?: string };
+  type L = { tx: string; block: number; value: bigint; token?: string; blockHash?: string; removed?: boolean };
   function inbox(logs: L[], inputs: Record<string, { input: string; to: string }>, calls: { method: string; params: unknown[] }[] = [], requests: { n: number } = { n: 0 }): Fetch {
     const answer = (method: string, params: unknown[]) => {
       calls.push({ method, params });
       if (method === "eth_blockNumber") return "0x" + HEAD.toString(16);
-      if (method === "eth_getTransactionByHash") return inputs[params[0] as string] ?? null;
+      if (method === "eth_getBlockByNumber") return canonicalBlock(Number(params[0]));
+      if (method === "eth_getTransactionByHash") {
+        const hash = params[0] as string;
+        const log = logs.find((entry) => entry.tx === hash);
+        const input = inputs[hash];
+        return input && log ? { ...minedTransaction(hash, log.block), blockHash: log.blockHash ?? canonicalBlockHash(log.block), ...input } : null;
+      }
       if (method === "eth_getLogs") {
         const q = params[0] as { fromBlock: string; toBlock: string; topics: string[] };
         const [from, to] = [Number(q.fromBlock), Number(q.toBlock)];
         return logs
           .filter((l) => l.block >= from && l.block <= to)
           .sort((a, b) => a.block - b.block)
-          .map((l) => ({ transactionHash: l.tx, blockNumber: "0x" + l.block.toString(16), topics: [TRANSFER_TOPIC, pad(PAYER), q.topics[2]], data: "0x" + l.value.toString(16) }));
+          .map((l) => ({ transactionHash: l.tx, blockNumber: "0x" + l.block.toString(16), blockHash: l.blockHash ?? canonicalBlockHash(l.block), removed: l.removed ?? false, topics: [TRANSFER_TOPIC, pad(PAYER), q.topics[2]], data: "0x" + l.value.toString(16) }));
       }
       return null;
     };
@@ -367,7 +444,7 @@ describe("findPayments", () => {
     }
     const requests = { n: 0 };
     const r = await findPayments(MEZO_TESTNET, { recipient: SHOP, fromBlock: 0 }, inbox(logs, inputs, [], requests));
-    expect(requests.n).toBeLessThanOrEqual(3);
+    expect(requests.n).toBeLessThanOrEqual(6);
     expect(r.status === "ok" && r.payments.length).toBe(50);
     expect(r.status === "ok" && r.truncated).toBe(true);
     expect(r.status === "ok" && r.clamped).toBe(true);
@@ -443,6 +520,46 @@ describe("findPayments", () => {
     const f = inbox([{ tx: h(2), block: HEAD - 1, value: 6n }], {});
     expect(await findDuplicatePayments(MEZO_TESTNET, { recipient: SHOP, memo: "INV-7", paidBlock: HEAD - 10, paidTxHash: h(1) }, f))
       .toEqual({ checked: false, duplicates: [], fromBlock: null });
+  });
+
+  it("refuses logs from removed or orphaned blocks instead of marking an invoice paid", async () => {
+    for (const change of [{ blockHash: "0x" + "ef".repeat(32) }, { removed: true }]) {
+      const f = inbox([{ tx: h(1), block: HEAD - 1, value: 5n, ...change }], { [h(1)]: direct("INV-7", 5n) });
+      expect(await findPayments(MEZO_TESTNET, { recipient: SHOP, memo: "INV-7", amount: 5n }, f)).toMatchObject({ status: "unavailable" });
+    }
+  });
+
+  it("requires transaction metadata to match the log and its canonical block", async () => {
+    const source = inbox([{ tx: h(1), block: HEAD - 1, value: 5n }], { [h(1)]: direct("INV-7", 5n) });
+    for (const change of [{ blockHash: null }, { blockHash: "0x" + "ef".repeat(32) }, { blockNumber: "0x1" }, { hash: h(2) }]) {
+      const f = changeRpcResult(source, (method, _params, result) => method === "eth_getTransactionByHash" ? { ...(result as object), ...change } : result);
+      expect(await findPayments(MEZO_TESTNET, { recipient: SHOP, memo: "INV-7", amount: 5n }, f)).toMatchObject({ status: "unavailable" });
+    }
+  });
+
+  it("refuses a scan when the pinned head changes after log classification", async () => {
+    let heads = 0;
+    const source = inbox([{ tx: h(1), block: HEAD - 1, value: 5n }], { [h(1)]: direct("INV-7", 5n) });
+    const f = changeRpcResult(source, (method, params, result) => method === "eth_getBlockByNumber" && Number(params[0]) === HEAD && ++heads > 1
+      ? { ...(result as object), hash: "0x" + "ef".repeat(32) } : result);
+    expect(await findPayments(MEZO_TESTNET, { recipient: SHOP, memo: "INV-7", amount: 5n }, f)).toMatchObject({ status: "unavailable" });
+  });
+
+  it("caps actual HTTP requests when retries and lagging transaction reads exhaust the scan budget", async () => {
+    let requests = 0;
+    let transactionRounds = 0;
+    const source = inbox([{ tx: h(1), block: HEAD - 1, value: 5n }], { [h(1)]: direct("INV-7", 5n) });
+    const f: Fetch = async (url, init) => {
+      requests++;
+      if (requests % 3 !== 0) throw new Error("transient network failure");
+      const body = JSON.parse(String(init!.body));
+      if (Array.isArray(body) && body[0].method === "eth_getTransactionByHash" && ++transactionRounds < 3) {
+        return new Response(JSON.stringify(body.map((query: { id: number }) => ({ jsonrpc: "2.0", id: query.id, result: null }))));
+      }
+      return source(url, init);
+    };
+    expect(await findPayments(MEZO_TESTNET, { recipient: SHOP, memo: "INV-7", amount: 5n }, f)).toMatchObject({ status: "unavailable" });
+    expect(requests).toBe(PAYMENT_SCAN_REQUEST_LIMIT);
   });
 
   it("lists further payments with the same reference as duplicates, newest first, without the recorded one", async () => {
@@ -544,8 +661,10 @@ describe.runIf(process.env.LIVE === "1")("live Mezo RPC (LIVE=1)", () => {
   it("both testnet endpoints and both mainnet endpoints serve the right chain", async () => {
     for (const c of [MEZO_TESTNET, MEZO_MAINNET]) {
       for (const url of [c.rpc, c.rpcFallback!]) {
-        const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_chainId", params: [] }) });
-        expect(Number(((await res.json()) as { result: string }).result)).toBe(c.id);
+        // Retry transport/RPC errors on this exact endpoint. A wrong chain still fails immediately;
+        // a healthy fallback must not hide a broken endpoint in this availability check.
+        const result = await rpc<string>({ ...c, rpc: url, rpcFallback: undefined }, "eth_chainId", []);
+        expect(Number(result), url).toBe(c.id);
       }
     }
   }, 30000);

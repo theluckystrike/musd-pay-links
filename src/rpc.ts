@@ -3,7 +3,7 @@
 import { decodeFunctionResult, encodeFunctionData, erc20Abi, getAddress } from "viem";
 
 import { formatAmount } from "./amount.ts";
-import { type MezoChain } from "./chains.ts";
+import { CONFIRMATIONS_REQUIRED, type MezoChain } from "./chains.ts";
 import { MEMO_PATTERN } from "./eip681.ts";
 
 export type Fetch = (input: string, init?: RequestInit) => Promise<Response>;
@@ -12,6 +12,8 @@ export const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11
 
 /** Wait between two retries of a read, multiplied by the attempt number. */
 export const RETRY_DELAY_MS = 300;
+/** Bound one invoice scan, including retries, so two scans plus store calls fit a Worker request. */
+export const PAYMENT_SCAN_REQUEST_LIMIT = 18;
 /** Retry timing. Tests lower `delayMs` so they run fast; production code never changes it. */
 export const retry = { delayMs: RETRY_DELAY_MS };
 
@@ -63,6 +65,45 @@ function blockNumber(value: unknown): number {
   const parsed = BigInt(value);
   if (parsed > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("RPC block height exceeds the supported range");
   return Number(parsed);
+}
+
+const blockTag = (height: number) => `0x${height.toString(16)}`;
+const isHash = (value: unknown): value is string => typeof value === "string" && /^0x[0-9a-fA-F]{64}$/.test(value);
+
+interface BlockHeader { number: string; hash: string }
+interface ChainTransaction {
+  hash: string;
+  input: string;
+  to: string | null;
+  blockNumber: string | null;
+  blockHash: string | null;
+}
+
+function checkedHeader(value: BlockHeader | null, expected: number): BlockHeader {
+  if (!value || blockNumber(value.number) !== expected || !isHash(value.hash)) throw new Error("RPC returned an invalid canonical block header");
+  return value;
+}
+
+/** At most fifty distinct payment blocks, in one HTTP request rather than one request per transfer. */
+async function canonicalHeaders(chain: MezoChain, heights: number[], fetchImpl?: Fetch): Promise<Map<number, string>> {
+  const distinct = [...new Set(heights)];
+  if (distinct.length > MAX_TX_READS) throw new Error("Too many distinct payment blocks");
+  const headers = await rpcBatch<BlockHeader>(chain, distinct.map((height) => ({ method: "eth_getBlockByNumber", params: [blockTag(height), false] })), fetchImpl, { allowNull: false });
+  return new Map(distinct.map((height, index) => [height, checkedHeader(headers[index] ?? null, height).hash.toLowerCase()]));
+}
+
+async function unchangedHead(chain: MezoChain, height: number, expectedHash: string, fetchImpl?: Fetch): Promise<void> {
+  const header = checkedHeader(await rpc<BlockHeader | null>(chain, "eth_getBlockByNumber", [blockTag(height), false], fetchImpl), height);
+  if (header.hash.toLowerCase() !== expectedHash.toLowerCase()) throw new Error("The chain head changed during payment verification");
+}
+
+function boundedScanFetch(fetchImpl: Fetch = fetch): Fetch {
+  let requests = 0;
+  return (url, init) => {
+    if (requests >= PAYMENT_SCAN_REQUEST_LIMIT) throw new Error("Payment scan request limit reached");
+    requests++;
+    return fetchImpl(url, init);
+  };
 }
 
 function call(chain: MezoChain, data: `0x${string}`, fetchImpl?: Fetch, from?: string): Promise<`0x${string}`> {
@@ -137,9 +178,11 @@ export type VerifyResult =
 export const NETWORK_UNAVAILABLE_MESSAGE = "The network did not answer. Try again in a moment.";
 
 interface Receipt {
+  transactionHash: string;
   status: string;
   from?: string;
   blockNumber: string;
+  blockHash: string;
   to: string | null;
   logs: { address: string; topics: string[]; data: string }[];
 }
@@ -175,12 +218,12 @@ async function rpcNotNull<T>(chain: MezoChain, method: string, params: unknown[]
 export async function verifyPayment(chain: MezoChain, input: VerifyInput, fetchImpl?: Fetch): Promise<VerifyResult> {
   if (!/^0x[0-9a-fA-F]{64}$/.test(input.txHash)) return { status: "not_found", message: "Not a transaction hash." };
   let receipt: Receipt | null;
-  let tx: { input: string; to: string | null } | null;
+  let tx: ChainTransaction | null;
   let headRaw: string | null;
   try {
     [receipt, tx, headRaw] = await Promise.all([
       rpcNotNull<Receipt>(chain, "eth_getTransactionReceipt", [input.txHash], fetchImpl),
-      rpcNotNull<{ input: string; to: string | null }>(chain, "eth_getTransactionByHash", [input.txHash], fetchImpl),
+      rpcNotNull<ChainTransaction>(chain, "eth_getTransactionByHash", [input.txHash], fetchImpl),
       rpcNotNull<string>(chain, "eth_blockNumber", [], fetchImpl),
     ]);
   } catch {
@@ -188,7 +231,6 @@ export async function verifyPayment(chain: MezoChain, input: VerifyInput, fetchI
   }
   if (!tx) return { status: "not_found", message: `No transaction ${input.txHash} on ${chain.name}.` };
   if (!receipt) return { status: "pending", message: "The transaction is not mined yet." };
-  if (receipt.status !== "0x1") return { status: "failed", message: "The transaction reverted." };
   let block: number;
   let head: number;
   try {
@@ -198,6 +240,31 @@ export async function verifyPayment(chain: MezoChain, input: VerifyInput, fetchI
     if (block > head) throw new Error("Receipt is ahead of the reported chain head");
   } catch {
     return { status: "unavailable", message: NETWORK_UNAVAILABLE_MESSAGE };
+  }
+  if (receipt.status !== "0x1" && receipt.status !== "0x0") {
+    return { status: "unavailable", message: NETWORK_UNAVAILABLE_MESSAGE };
+  }
+  try {
+    if (!isHash(receipt.transactionHash) || receipt.transactionHash.toLowerCase() !== input.txHash.toLowerCase()
+      || !isHash(tx.hash) || tx.hash.toLowerCase() !== input.txHash.toLowerCase()
+      || !isHash(receipt.blockHash) || !isHash(tx.blockHash)
+      || blockNumber(tx.blockNumber) !== block || tx.blockHash.toLowerCase() !== receipt.blockHash.toLowerCase()) {
+      throw new Error("Payment receipt and transaction metadata disagree");
+    }
+    const headers = await canonicalHeaders(chain, [block, head], fetchImpl);
+    if (headers.get(block) !== receipt.blockHash.toLowerCase()) throw new Error("Payment receipt belongs to an orphaned block");
+    await unchangedHead(chain, head, headers.get(head)!, fetchImpl);
+  } catch {
+    return { status: "unavailable", message: NETWORK_UNAVAILABLE_MESSAGE };
+  }
+  const confirmations = head - block + 1;
+  if (receipt.status === "0x0") {
+    // The payer may retry only after the same confirmation policy used for a successful payment.
+    // A shallow revert can disappear in a reorg and the transaction can later execute successfully.
+    if (confirmations < CONFIRMATIONS_REQUIRED) {
+      return { status: "pending", message: `The transaction reverted but has only ${confirmations} of ${CONFIRMATIONS_REQUIRED} confirmations. Wait before any retry.` };
+    }
+    return { status: "failed", message: "The transaction reverted." };
   }
   if (input.fromBlock != null && block < input.fromBlock) {
     return {
@@ -218,7 +285,6 @@ export async function verifyPayment(chain: MezoChain, input: VerifyInput, fetchI
       message: `MUSD received by the recipient in this transaction is ${formatAmount(paid)}, expected ${formatAmount(input.amount)}.`,
     };
   }
-  const confirmations = head - block + 1;
   const from = receipt.from && /^0x[0-9a-fA-F]{40}$/.test(receipt.from) ? getAddress(receipt.from) : undefined;
   const direct = tx.to?.toLowerCase() === chain.musd.toLowerCase();
   const txMemo = direct ? memoFromInput(tx.input) : null;
@@ -344,18 +410,22 @@ export type FindResult =
     }
   | { status: "unavailable"; message: string; detail: string };
 
-interface Log { transactionHash: string; blockNumber: string; topics: string[]; data: string }
+interface Log { transactionHash: string; blockNumber: string; blockHash: string; removed?: boolean; topics: string[]; data: string }
 
 /**
  * Merchant inbox: list MUSD transfers to `recipient` since `fromBlock`, newest first, and read the
  * reference of each. With a memo, `paid` is the oldest payment after the invoice block that carries it
  * and covers the amount, so a later payment with the same reference cannot take its place.
- * The payer does not need to send a transaction hash. Uses at most 1 + 3 + 3 * 3 RPC requests.
+ * The payer does not need to send a transaction hash. Normal scans use six HTTP requests, with
+ * at most PAYMENT_SCAN_REQUEST_LIMIT requests including retries. The head and every payment block
+ * must remain canonical across log classification. Public RPC consistency is not consensus proof.
  */
 export async function findPayments(chain: MezoChain, input: FindInput, fetchImpl?: Fetch): Promise<FindResult> {
   const topic = "0x" + input.recipient.toLowerCase().slice(2).padStart(64, "0");
+  const scanFetch = boundedScanFetch(fetchImpl);
   try {
-    const head = blockNumber(await rpc<string>(chain, "eth_blockNumber", [], fetchImpl));
+    const head = blockNumber(await rpc<string>(chain, "eth_blockNumber", [], scanFetch));
+    const snapshot = checkedHeader(await rpc<BlockHeader | null>(chain, "eth_getBlockByNumber", [blockTag(head), false], scanFetch), head);
     const floor = Math.max(0, head - MAX_LOOKBACK);
     const wanted = input.fromBlock ?? floor;
     if (!Number.isSafeInteger(wanted) || wanted < 0) throw new Error("Payment search requires a valid start block");
@@ -368,27 +438,42 @@ export async function findPayments(chain: MezoChain, input: FindInput, fetchImpl
         method: "eth_getLogs",
         params: [{ address: chain.musd, fromBlock: "0x" + from.toString(16), toBlock: "0x" + to.toString(16), topics: [TRANSFER_TOPIC, null, topic] }],
       })),
-      fetchImpl,
+      scanFetch,
       { allowNull: false },
     );
     const logs = chunks.flatMap((c) => [...(c ?? [])].reverse()); // newest first
     // One entry per transaction, summing every MUSD transfer to the recipient inside it.
-    const byTx = new Map<string, { block: number; from: string; units: bigint }>();
+    const byTx = new Map<string, { block: number; blockHash: string; from: string; units: bigint }>();
     let truncated = false;
     for (const log of logs) {
       const block = blockNumber(log.blockNumber);
       if (block < start || block > head) throw new Error("RPC log falls outside the requested block range");
+      if (log.removed === true || !isHash(log.blockHash) || !isHash(log.transactionHash)) throw new Error("Payment log has invalid or removed block metadata");
       const hit = byTx.get(log.transactionHash);
-      if (hit) hit.units += BigInt(log.data);
-      else if (byTx.size < MAX_TX_READS) byTx.set(log.transactionHash, { block, from: getAddress("0x" + log.topics[1]!.slice(26)), units: BigInt(log.data) });
+      if (hit) {
+        if (hit.block !== block || hit.blockHash !== log.blockHash.toLowerCase()) throw new Error("Payment logs disagree about their transaction block");
+        hit.units += BigInt(log.data);
+      }
+      else if (byTx.size < MAX_TX_READS) byTx.set(log.transactionHash, { block, blockHash: log.blockHash.toLowerCase(), from: getAddress("0x" + log.topics[1]!.slice(26)), units: BigInt(log.data) });
       else truncated = true;
     }
     const hashes = [...byTx.keys()];
-    const txs = await readTransactions(chain, hashes, fetchImpl);
+    const txs = await readTransactions(chain, hashes, scanFetch);
     // A Transfer log proves money moved, but a missing transaction does not prove its reference was
     // absent. In particular an overpayment could already pay this invoice. Keep Pay locked until
     // every transaction in the bounded scan can be classified.
     if (txs.some((tx) => tx === null)) throw new Error("RPC did not return every payment transaction");
+    const headers = await canonicalHeaders(chain, [...byTx.values()].map((payment) => payment.block), scanFetch);
+    for (let i = 0; i < hashes.length; i++) {
+      const hash = hashes[i]!;
+      const payment = byTx.get(hash)!;
+      const tx = txs[i]!;
+      if (headers.get(payment.block) !== payment.blockHash || !isHash(tx.hash) || tx.hash.toLowerCase() !== hash.toLowerCase()
+        || !isHash(tx.blockHash) || tx.blockHash.toLowerCase() !== payment.blockHash || blockNumber(tx.blockNumber) !== payment.block) {
+        throw new Error("Payment logs or transactions belong to an orphaned or inconsistent block");
+      }
+    }
+    await unchangedHead(chain, head, snapshot.hash, scanFetch);
     const payments: FoundPayment[] = hashes.map((txHash, i) => {
       const p = byTx.get(txHash)!;
       const tx = txs[i];
@@ -442,12 +527,12 @@ export async function findDuplicatePayments(
 }
 
 /** Read transactions in batches. A lagging node can answer null, so null items are asked again, up to 3 rounds. */
-async function readTransactions(chain: MezoChain, hashes: string[], fetchImpl?: Fetch): Promise<({ input: string; to: string | null } | null)[]> {
-  const out: ({ input: string; to: string | null } | null)[] = hashes.map(() => null);
+async function readTransactions(chain: MezoChain, hashes: string[], fetchImpl?: Fetch): Promise<(ChainTransaction | null)[]> {
+  const out: (ChainTransaction | null)[] = hashes.map(() => null);
   for (let round = 0; round < 3; round++) {
     const missing = out.map((v, i) => (v ? -1 : i)).filter((i) => i >= 0);
     if (missing.length === 0) break;
-    const got = await rpcBatch<{ input: string; to: string | null }>(
+    const got = await rpcBatch<ChainTransaction>(
       chain,
       missing.map((i) => ({ method: "eth_getTransactionByHash", params: [hashes[i]] })),
       fetchImpl,
