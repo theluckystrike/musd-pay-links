@@ -1,6 +1,6 @@
 # MUSD Pay Links, AKINDO submission
 
-Answers for the Mezo Buildathon submission form. Updated on 26 October 2026, inside the Wave 1 build period (16 to 26 October 2026).
+Working submission draft updated on 1 November 2026. The original Wave 1 evidence is dated 26 October and is labelled below. This file does not prove that any updated answer was submitted to AKINDO or that the live demo serves this branch.
 
 ## Project name
 
@@ -12,11 +12,11 @@ Payment links for MUSD
 
 ## TL;DR
 
-Merchants ask for MUSD with a signed invoice, a link, a QR code or a pay page in a chat. Payers check the link before they pay. The page blocks a second payment from the same browser and checks the chain again before it sends. Two payers can still race, so a later payment with the same reference is shown as a duplicate and a refund is due. A payer who is short of MUSD sees how much BTC would mint it.
+Merchants ask for MUSD with a signed invoice, a link, a QR code or a pay page in a chat. Payers check the link before they pay. The page blocks a second payment from the same browser and checks the chain again before it sends. Two payers can still race, so a later payment with the same reference is shown as a duplicate and a refund is due. A payer who is short of MUSD sees a protocol quote and can separately review a direct testnet loan.
 
 ## Short summary
 
-MUSD Pay Links lets anyone request MUSD on Mezo with a standard EIP-681 link. A payer-side TypeScript guard refuses a link unless the token is the real MUSD contract for that chain, the recipient is a valid address, and the amount is within the payer's limit. A payer without enough MUSD gets a borrow quote read from the live MUSD protocol. The merchant finds the payment on chain by its invoice reference. The pay page locks itself once a payment for the invoice is on chain.
+MUSD Pay Links lets anyone request MUSD on Mezo with a standard EIP-681 link. A payer-side TypeScript guard refuses a link unless the token is the real MUSD contract for that chain, the recipient is a valid address, and the amount is within the payer's limit. A payer without enough MUSD gets a quote read from the live MUSD protocol. The current source also offers a separate testnet loan review and wallet action; its execution evidence is reported separately. The merchant finds the payment on chain by its invoice reference. The pay page locks itself once a payment for the invoice is on chain.
 
 ## How it works
 
@@ -26,15 +26,17 @@ The merchant creates an invoice for MUSD on Mezo Testnet (31611) or Mezo Mainnet
 
 The payer side parses the link strictly. The token must be the MUSD contract for the link's chain id. The recipient must be a valid address, and must be on the payer's allowlist when one is set. A mixed-case address with a wrong EIP-55 checksum is refused. An address in one case is accepted with a warning, because most link generators write lowercase. The amount must be within the payer's limit, with exact integer math at 18 decimals. Unicode tricks, percent-encoding, duplicated or unknown parameters, execution parameters and functions such as `approve` are refused. Every refusal has a code and a plain reason. When all checks pass, the guard returns an unsigned `transfer` call. It never holds a key.
 
-When the payer is short of MUSD, the page reads the MUSD protocol on Mezo. It reads the BTC price from PriceFeed, MCR, CCR, the minimum debt, the gas compensation and the fee from BorrowerOperations, the interest rate from InterestRateManager, and the system ratio and recovery mode from TroveManager. It then shows the BTC to lock, the debt, the liquidation price and a link to the borrow page of the Mezo app. The payer keeps the Bitcoin and pays in MUSD.
+When the payer is short of MUSD, the page reads the MUSD protocol on Mezo. It reads the BTC price from PriceFeed, MCR, CCR, the minimum debt, the gas compensation and the fee from BorrowerOperations, the interest rate from InterestRateManager, and the system ratio and recovery mode from TroveManager. The quote shows BTC collateral, full debt and liquidation price. On testnet, the user can review a direct `openTrove` request before a separate wallet action. Preparation checks the pinned deployment, actual balance, nonce, gas and a simulation without balance overrides. The page refreshes and checks the exact review before asking the wallet. This review expires after at most 60 seconds, but price, fee and state can still change before mining: `openTrove` has no maximum-fee argument. Mainnet borrowing remains in the external Mezo app. The borrower locks BTC as collateral; a loan does not automatically pay an invoice. The protocol minimum can make the debt much larger than the requested payment. The review includes minted MUSD, the borrowing fee and the GasPool reserve. That reserve is not spendable money or a refund to the borrower.
 
 Checking an invoice reads MUSD Transfer logs to the merchant address since the invoice block. It decodes the reference from each payment and marks the invoice paid with the oldest payment that carries the exact reference and covers the amount. The payer does not need to send a hash. A transaction that paid one invoice cannot pay another. A payment from before the invoice block does not count. A payment of the exact amount without a reference shows as a possible match, because some wallets drop the reference. An invoice is recorded as paid only at 5 confirmations. Before that it shows as confirming, with the depth. The pay page is payer-only. It shows the amount, recipient, token, network, reference, status with confirmation depth, the QR code and the Pay action, and it hides the merchant panels. The pay page checks the chain when it opens and again right before it sends. It blocks a second payment from the same browser, and it locks Pay when a payment for the invoice exists. Two payers can still race. When an invoice is paid, later transfers with the same reference are listed as duplicates, with their transaction hashes and a refund due. A merchant can also record a payment by its hash, for example for an invoice older than the search window of about 23 hours. Invoices work on any device and expire after 30 days.
 
-How MUSD is used and positioned. MUSD is the only asset the product moves. It uses the MUSD token on both Mezo chains and four contracts of the MUSD protocol. The addresses come from the Mezo docs and the official deployment files in github.com/mezo-org/musd. The goal is to make MUSD easy to ask for, safe to pay, and easy to get for a Bitcoin holder who has none yet. Which wallets open these links has not been tested yet.
+How MUSD is used and positioned. MUSD is the payment asset. The direct testnet loan also locks native test BTC. The app uses the MUSD token on both Mezo chains and reads the deployed MUSD protocol contracts. The addresses come from the Mezo docs and the official deployment files in github.com/mezo-org/musd. The goal is to make MUSD easy to ask for, safe to pay, and easy to get for a Bitcoin holder who has none yet. A desktop wallet check is separate from general wallet and mobile compatibility; current results are recorded in `docs/verification.md`.
+
+After network selection, the payer may see another normal account-permission prompt. The app checks the original payer and selected chain again before payment. This flow needs wallet-specific execution evidence; a permission reply alone does not prove compatibility. An uncertain send remains locked, including an authorization error after the send request.
 
 ## Business model
 
-Today the project is free and open source (MIT). It has no customers and no revenue. The plan has two parts. The guard library and the plain links stay free, so wallets and agents can use them. A hosted invoice service for shops gets a flat monthly plan with payment notifications, higher limits and a custom pay page. Payments always go straight from the payer to the merchant. The service never holds funds. The Wave 2 goal is 10 pilot merchants from the Mezo community and the author's network. None is signed today. A shop picks this over a wallet address in a chat for three reasons. The payer's guard stops a changed link. The payment is found by its reference with no hash from the payer. A payer with BTC and no MUSD sees how to mint it on the same page.
+Today the project is free and open source (MIT). It has no customers and no revenue. The plan has two parts. The guard library and the plain links stay free, so wallets and agents can use them. A hosted invoice service for shops would offer payment notifications, higher limits and a custom pay page for a flat monthly price. Pricing is unvalidated. Payments go straight from the payer to the merchant. The service never holds funds. The next validation target is one voluntary merchant or freelancer test. No participant or paid plan is agreed today. A shop may prefer this to an address in a chat because the guard checks the link and the merchant finds payment by its reference. A payer with BTC and no MUSD can separately inspect the full cost of borrowing.
 
 ## Target group
 
@@ -58,7 +60,9 @@ Entirely new, built during the hackathon. It reuses design ideas from PayLink Gu
 
 ## Project readiness
 
-Testnet deployment with a real payment. A live web app and JSON API on Cloudflare Workers read the MUSD token and the MUSD protocol on Mezo Testnet and Mainnet.
+The historical deployment has project-owned testnet payment evidence. Its web app and JSON API read the MUSD token and protocol on Mezo Testnet and Mainnet. The isolated [1 November Preview](https://sprint-20261101-musd-pay-links.lipmichal.workers.dev) serves application source `e50735e`, with separate invoice storage. It is not a production traffic rollout.
+
+On 1 November, [hosted real MetaMask run 41302937067](https://github.com/theluckystrike/musd-pay-links/actions/runs/41302937067) at `5987b40` signed invoice `INV-6MG8SUDA`, rejected one transaction without a nonce change, then made one [1 MUSD payment](https://explorer.test.mezo.org/tx/0x11028978ae896a11ad946047bebd829882f729580d1d452cabf4c50b97df1fad). Exact transfer calldata, invoice reference, canonical block and at least five confirmations passed. The product showed Paid and retained its lock after reload. This wallet test used a local Worker and two project wallets, so it does not prove payment through the public HTTPS Preview or outside adoption. See the [dated evidence and limits](docs/sprint-2026-11-01/README.md). A newly opened in-product loan remains unproved because the new test wallet lacks enough native collateral.
 
 On 26 October 2026 the project made its own payment on Mezo Testnet, end to end. Testnet only, no real money.
 
@@ -70,13 +74,15 @@ On 26 October 2026 the project made its own payment on Mezo Testnet, end to end.
 
 6. Duplicate payment. On 26 Oct a second 5 MUSD payment with the same reference went to the paid invoice INV-65ZVUMXW (https://explorer.test.mezo.org/tx/0x95ef25c8d2f3dec854e8203e3122ec6694f12153d2d21b7f5945669a7c902dc4). The invoice API lists it under duplicates with refund due. The invoice still counts the first payment only.
 
-The payments were sent from scripts. A browser wallet has not paid a link yet.
+These 26 October payments were sent from scripts. They do not establish browser-wallet use or an outside merchant pilot. The separate 1 November browser result is recorded above and in `docs/verification.md`. No newly opened in-product loan or outside merchant pilot is claimed.
 
 ## Links
 
 | What | Where |
 |---|---|
 | Live demo | https://musd-pay-links.lipmichal.workers.dev |
+| Isolated 1 November Preview | https://sprint-20261101-musd-pay-links.lipmichal.workers.dev |
+| 1 November browser evidence | https://github.com/theluckystrike/musd-pay-links/blob/sprint/20261101-wallet-evidence/docs/sprint-2026-11-01/README.md |
 | Repository | https://github.com/theluckystrike/musd-pay-links |
 | Pitch deck | https://github.com/theluckystrike/musd-pay-links/blob/main/docs/pitch-deck.pdf |
 | Pitch video | https://youtu.be/T4JLpYwOAoY |
@@ -88,12 +94,12 @@ The payments were sent from scripts. A browser wallet has not paid a link yet.
 
 ## Evidence
 
-337 tests pass, 330 offline and 7 that read Mezo over RPC. One of them verifies the project's own payment on chain. They cover the guard's attack cases, the borrow quote rules, invoices, signed creation (good signature, wrong signer, expired time, replay), the confirmation depth, confirm by hash, a double payment, batched log search, replay by block, the RPC fallback, CORS, the rate limit and the HTTP codes. Contract reads, `eth_call` dry runs and the project's own borrow and payment are in `docs/evidence.json` in the repository.
+The 26 October baseline reported 337 passing tests: 330 offline and 7 live RPC cases. This is a dated baseline, not the current sprint count. One live case verifies the project's own earlier payment on chain. They cover the guard's attack cases, the borrow quote rules, invoices, signed creation (good signature, wrong signer, expired time, replay), the confirmation depth, confirm by hash, a double payment, batched log search, replay by block, the RPC fallback, CORS, the rate limit and the HTTP codes. Contract reads, `eth_call` dry runs and the project's own earlier borrow and payment are in `docs/evidence.json`. That file is chain evidence; it contains no Vitest runner report and cannot prove a test total. Fresh runner JSON, exact commands, commit identifiers and browser results are described in `docs/verification.md`. A successful build or runtime check alone proves no wallet transaction, loan, customer use or revenue.
 
 ## What is next
 
-1. By 15 November 2026 (Wave 2), pay a link from a browser wallet on Mezo Testnet and record it, publish the guard as an npm package, and add a Telegram bot that creates links and reports payments.
-2. By the end of December 2026, add Mezo Passport so Bitcoin wallets can pay links, and open the trove from the pay page when the payer is short.
+1. For Wave 2, seek one voluntary merchant or freelancer test through a permitted route. Record the problem, agreed task, actual outcome and feedback. Update the dated deck and video before a new submission. A public guard package and Telegram integration remain planned, not shipped.
+2. Prove a newly opened loan through the testnet review flow, then test the return to invoice payment. Add Mezo Passport so Bitcoin wallets can pay links. Mainnet loan support requires separate work and evidence.
 3. By the end of January 2027, add merchant notifications, so a small shop can take MUSD with links and see each payment confirmed without running a node.
 
 ## Team info

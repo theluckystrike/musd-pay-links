@@ -1,0 +1,111 @@
+{
+  "artifactType": "Derived summary of retained native browser evidence",
+  "recordedAt": "2026-11-01T11:49:32.987497+00:00",
+  "browserCompletedAt": "2026-11-01T11:42:39.877Z",
+  "sourceCommit": "5987b40b82eb0451e9d573c0295e933cdd9d01e7",
+  "workflowURL": "https://github.com/theluckystrike/musd-pay-links/actions/runs/41302937067",
+  "nativeEvidenceSha256": "1f4f18e514b0e17f7d6f3df1abe0676358b76e3c384f7248bd1ba1e1f1c7ea97",
+  "status": "passed",
+  "checksPassed": 84,
+  "failedChecks": 0,
+  "environment": {
+    "application": "Isolated local Wrangler Worker on hosted Linux, not the public HTTPS Preview",
+    "chainId": 31611,
+    "wallet": "Official unmodified MetaMask13.55.0",
+    "providerInjectedByHarness": false,
+    "packageSha256": "36ce2660b08ec7c52886438d5ca5c00ce79e883bacee87c16760371cfa88878f",
+    "bothAccountsProjectOwned": true
+  },
+  "walletActions": {
+    "signatureApprovals": 1,
+    "transactionRejections": 1,
+    "transactionApprovals": 1,
+    "walletPromptActions": 14,
+    "countsAreActionAttempts": true
+  },
+  "payment": {
+    "hash": "0x11028978ae896a11ad946047bebd829882f729580d1d452cabf4c50b97df1fad",
+    "sender": "0x37a818f46A4EdC2Bc0747E59F8529cdB9C3d6E62",
+    "recipient": "0xC4A9a6B5E28FDe087dC0c90a82318bbC28861628",
+    "amount": "1",
+    "reference": "INV-6MG8SUDA",
+    "chainId": 31611,
+    "sentFromActualBrowserWallet": true,
+    "block": "16505037",
+    "blockHash": "0xc50563ed1a81320d188202fbdb40e204eb9852dfb5cee55a8d5e4fce06e32942",
+    "canonicalBlockHash": "0xc50563ed1a81320d188202fbdb40e204eb9852dfb5cee55a8d5e4fce06e32942",
+    "receiptStatus": "success",
+    "transactionNonce": 0,
+    "confirmations": "5",
+    "gasUsed": "51877",
+    "received": "1000000000000000000",
+    "exactCalldataMatched": true,
+    "nativeValue": "0",
+    "explorer": "https://explorer.test.mezo.org/tx/0x11028978ae896a11ad946047bebd829882f729580d1d452cabf4c50b97df1fad"
+  },
+  "invoice": {
+    "chainId": 31611,
+    "to": "0xC4A9a6B5E28FDe087dC0c90a82318bbC28861628",
+    "amount": "1",
+    "units": "1000000000000000000",
+    "memo": "INV-6MG8SUDA",
+    "fromBlock": 16505029,
+    "createdAt": "2026-11-01T11:41:44.392Z",
+    "link": "ethereum:0x118917a40FAF1CD7a13dB0Ef56C86De7973Ac503@31611/transfer?address=0xC4A9a6B5E28FDe087dC0c90a82318bbC28861628&uint256=1000000000000000000&memo=INV-6MG8SUDA",
+    "signed": true,
+    "paid": {
+      "txHash": "0x11028978ae896a11ad946047bebd829882f729580d1d452cabf4c50b97df1fad",
+      "block": 16505037,
+      "from": "0x37a818f46A4EdC2Bc0747E59F8529cdB9C3d6E62",
+      "amount": "1",
+      "at": "2026-11-01T11:42:34.089Z"
+    },
+    "explorer": "https://explorer.test.mezo.org/tx/0x11028978ae896a11ad946047bebd829882f729580d1d452cabf4c50b97df1fad"
+  },
+  "ui": {
+    "paidAndPayDisabled": true,
+    "reloadPaidLockPassed": true,
+    "storedInvoiceExactHashPassed": true
+  },
+  "missingWebLocksSimulation": {
+    "status": "passed",
+    "method": "Feature-absence simulation in a real Chromium page with the real MetaMask extension.",
+    "override": "This page alone exposes navigator.locks as undefined before application code runs.",
+    "nativeBrowserClaim": "This does not claim native Chromium lacks Web Locks.",
+    "nonceBefore": 0,
+    "nonceAfter": 0,
+    "walletPromptActionDelta": 0
+  },
+  "images": [
+    {
+      "path": "signed-invoice.png",
+      "sourceName": "01-signed-invoice.png",
+      "sha256": "cc1ba186857a7d121c966f221bb27d8a6a3a9cd02176ee67b7f220941d0c874c",
+      "bytes": 223160,
+      "caption": "Merchant UI created the wallet-signed invoice."
+    },
+    {
+      "path": "wallet-review.png",
+      "sourceName": "wallet-payment-review.png",
+      "sha256": "bfee9a0d03d8e5864d81e46e212a7e67137e41e874662f4abb839e816eb7fedc",
+      "bytes": 43416,
+      "caption": "Real MetaMask confirmation. Its retained heading says Unknown; this image does not verify the token amount."
+    },
+    {
+      "path": "paid-invoice.png",
+      "sourceName": "04-paid-invoice.png",
+      "sha256": "6086b3e2e9dcd96f12a92d93579a18d2c4efcb8a6e0c435f1e11397932b82b4f",
+      "bytes": 95777,
+      "caption": "After confirmation the product says Paid and disables Pay."
+    }
+  ],
+  "limits": [
+    "Both accounts and all tokens are project-owned testnet data; no outside user, revenue, award or cash payment is established.",
+    "This proves one hosted desktop MetaMask flow against a local Worker; it does not prove wallet payment through the public Preview, mobile wallets or other wallet products.",
+    "The wallet review capture shows Unknown and does not visually verify amount; exact contract/calldata/reference and Transfer amount were verified on chain.",
+    "Paid and reloaded-paid screenshots in the native artifact have identical pixels; the reload behavior is also checked by the actual DOM assertion and stored invoice read.",
+    "The older borrowed position is historical. No newly opened in-product loan is proved."
+  ],
+  "applicationSourceCommit": "e50735e5ea034a96a912545756005bc4af87205b",
+  "applicationPathsMatchAtHarnessRevision": true
+}

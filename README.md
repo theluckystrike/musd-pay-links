@@ -4,13 +4,17 @@ Payment links, QR codes and invoices for MUSD on Mezo. A payer-side guard checks
 
 - Live demo at https://musd-pay-links.lipmichal.workers.dev
 - Pitch deck in [docs/pitch-deck.pdf](docs/pitch-deck.pdf)
-- Raw evidence in [docs/evidence.json](docs/evidence.json)
+- Historical chain evidence in [docs/evidence.json](docs/evidence.json)
+- Current verification commands and evidence limits in [docs/verification.md](docs/verification.md)
+- Isolated 1 November branch Preview: https://sprint-20261101-musd-pay-links.lipmichal.workers.dev
+
+On 1 November, real MetaMask signed an invoice, rejected one payment without changing the payer nonce, then sent one confirmed 1 MUSD testnet payment. The page showed Paid and retained its lock after reload. This was a hosted desktop test against a local Worker with two project wallets. Read the [receipt, screenshots and limits](docs/sprint-2026-11-01/README.md). A dated clean revision passed 481 tests with live RPC checks enabled. No new in-product loan, outside merchant use or revenue is established.
 
 <img src="docs/demo-desktop.png" alt="MUSD Pay Links demo page" width="100%">
 
-## Results
+## Evidence
 
-Testnet only. No real money. Each row was checked on chain or on the live Worker.
+The table below records the 26 October 2026 baseline. These project-owned testnet transactions are not customer payments or revenue. The deck and screenshots above also predate the current sprint. Source changes on a branch do not establish that the live demo has been updated.
 
 | What | Proof | Result |
 |---|---|---|
@@ -23,22 +27,24 @@ Testnet only. No real money. Each row was checked on chain or on the live Worker
 | Same payment with a wrong reference or a later invoice block | live `/api/verify` | `mismatch` |
 | MUSD contracts on testnet and mainnet | `name()`, `symbol()`, `decimals()` | "Mezo USD", "MUSD", 18 |
 | Borrow quote from the live MUSD protocol | PriceFeed, TroveManager, BorrowerOperations, InterestRateManager | price, MCR, CCR, fee, minimum debt |
-| Tests | `LIVE=1 pnpm test` on 26 October 2026 | 337 of 337 passed |
+| Historical tests | `LIVE=1 pnpm test` on 26 October 2026 | Reported 337 passed: 330 offline and 7 live RPC cases. Fresh runner receipts are separate |
 
-The payer and the merchant are both test addresses of the project. The payments came from scripts. No browser wallet has paid a link yet.
+The payer and merchant in this baseline are both project test addresses. These payments came from scripts. Current browser-wallet and newly opened loan results must be checked separately in [verification evidence](docs/verification.md).
 
 ## What it does
 
 1. The merchant creates an invoice. The wallet that receives the payment signs it (EIP-191 `personal_sign`, a free message). The Worker gives the invoice a unique reference and stamps it with the current block.
 2. The merchant shares an EIP-681 link, a QR code or a pay page. A pay page (`/?invoice=...`) is payer-only. It shows the amount, recipient, token, network, reference, status with confirmation depth, the QR code and the Pay action. The merchant panels stay hidden.
 3. The payer's guard checks the link. The token must be the real MUSD contract for the chain id. The recipient must be a valid address. The amount must be within the payer's limit. Every refusal has a code and a plain reason. The guard returns an unsigned `transfer` call. It never holds a key.
-4. A payer who is short of MUSD sees how much BTC would mint it in the MUSD protocol. The page links to the borrow page of the Mezo app.
+4. A payer who is short of MUSD can read a protocol quote. On Mezo Testnet, the page also offers a separate **Review testnet loan** step and **Open testnet loan** wallet action. The review shows collateral, the MUSD mint, full debt, fee, GasPool reserve, interest and gas. Mainnet borrowing links to the Mezo app. Borrowing does not automatically pay the invoice.
 5. The Worker finds the payment on chain by its reference. The payer does not send a hash.
 6. A wallet may drop the reference. Such a payment shows as a possible match. The invoice recipient signs an accept request that names the reference and the transaction hash. The watch panel offers an **Accept this payment** button. It asks for the invoice recipient's wallet and signs a message. The invoice is then recorded as paid with `referenceMissing: true`.
 
 ## How it protects the money
 
-- The pay page checks the chain when it opens and again right before the wallet window opens. Pay stays locked when a matching payment exists, when the search cannot cover every block since the invoice, or when the check fails. A second click while the wallet is open does nothing. The page remembers a hash it sent, so a reload or a second tab does not pay again.
+After selecting the network, Pay may request account permission again through the wallet's normal consent screen. Check the account and network there. The page keeps the original chosen payer and checks both values again. A permission reply alone does not establish compatibility with every wallet. An uncertain send stays locked even when the wallet reports an authorization error.
+
+- The pay page checks the chain when it opens and again before it asks the wallet. It binds the request to the selected account, chain and checked transfer. Pay stays locked when a matching payment exists, the search cannot cover every block since the invoice, or a check fails. Invoice sends require Web Locks to coordinate tabs. The page saves an attempt before asking the wallet and retains uncertain results across reloads; a missing RPC result does not unlock another request.
 - The page does not stop two different browsers. Two payers can still race, so both can pay the same open invoice before either payment is on chain. The invoice records the oldest payment. A later payment with the same reference is listed as a duplicate, with its transaction hash and a refund due.
 - A smaller payment with the reference, or a payment of the exact amount without it, also locks Pay. The payer must say it is not theirs first.
 - An invoice is recorded as paid only at 5 confirmations (`CONFIRMATIONS_REQUIRED`). Before that, the answer is `confirming` with the depth.
@@ -51,6 +57,16 @@ The payer and the merchant are both test addresses of the project. The payments 
 - A recipient address in one case (no EIP-55 checksum) is accepted with the warning `recipient_no_checksum`. A mixed-case address with a wrong checksum is refused.
 
 The guard also refuses fake and lookalike tokens, the wrong chain, amounts above uint256, unicode tricks, percent-encoding, extra or duplicated parameters, and `approve` or other functions. The tests in `test/guard.test.ts` list every case.
+
+## Testnet borrowing
+
+The direct action supports only the pinned Mezo Testnet deployment. It prepares an unsigned `openTrove` call after checking contract links and proxy implementation addresses, actual account balance, nonce, gas and the absence of an active trove. It reads terms at one checked block and simulates against real state without a balance override. Deployment pins are identity checks, not a contract audit.
+
+The user reviews the loan before a separate wallet request. A changed input, account, chain, price, fee, nonce or transaction requires a new review. The review lasts at most 60 seconds, and freshness is checked again before asking the wallet. The contract has no maximum-fee argument. Price, fees and state can still change before mining, including while the wallet is open.
+
+The protocol minimum can make a loan much larger than the invoice. Full debt includes minted MUSD, any borrowing fee and the protocol gas reserve. At the 26 October transaction, 1,800 MUSD minted plus a 1.8 MUSD fee and a 200 MUSD reserve produced 2,001.8 MUSD debt. The reserve is minted to GasPool and burned from that pool on closure. It is not spendable MUSD or a refund to the borrower. Closing the page does not close the loan.
+
+**Check loan result** verifies the exact transaction and mint after at least five confirmations. It reads actual trove state and the MUSD balance at the end of the receipt block. An uncertain request stays locked. A matching, sufficiently deep canonical revert can clear its saved marker for a new review. The app does not provide an arbitrary reset for an unknown broadcast.
 
 ## MUSD contracts
 
@@ -97,10 +113,23 @@ pnpm install
 pnpm test            # no network
 LIVE=1 pnpm test     # also reads the real contracts
 pnpm typecheck
+pnpm build
+pnpm test:runtime    # boots the configured local Worker and checks real HTTP routes
 pnpm deploy          # Cloudflare Workers
+pnpm preview --name sprint-20261101 # isolated branch Preview
 ```
 
-Scripts that use a testnet key file. The key stays outside the repo and is never printed.
+The Preview uses a separate invoice KV namespace and separately provisioned Durable Objects. Its
+configured KV namespace is shared by Previews that use the same ID; use another test namespace when
+they need separate KV data. Preview publication and production rollout have separate receipts.
+
+A read-only command checks an existing testnet loan. It does not create one:
+
+```sh
+pnpm verify-borrow <transaction-hash> <borrower-address>
+```
+
+The following scripts use a testnet key file. The key stays outside the repo and is never printed.
 
 ```sh
 MEZO_KEY_FILE=/path/to/key pnpm testnet-borrow --dry-run
@@ -110,7 +139,9 @@ MEZO_KEY_FILE=/path/to/key pnpm create-invoice 5          # signed invoice for t
 
 ## Known limits
 
-- No browser wallet has paid a link yet. Wallet support for EIP-681 token links varies.
+- Wallet support for EIP-681 token links varies. A result from one tested desktop wallet does not establish support in other wallets or on mobile. See the current evidence status in [docs/verification.md](docs/verification.md).
+- The direct borrow implementation is testnet-only. A passed simulation, mocked wallet test or old script loan does not prove a newly opened loan through the page. It does not repay, close or adjust a trove.
+- Borrowing and invoice sends require Web Locks. An uncertain request with no returned hash needs wallet activity to be reconciled before another request; the page keeps it locked.
 - References are unique per chain, first come first served. A random reference is the default.
 - Signed create works with plain wallets (EOA). Smart-contract wallets (EIP-1271) are not supported yet.
 - Invoices made before 26 October 2026 have no signature. They stay readable and show `signed: false`.

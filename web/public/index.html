@@ -65,6 +65,11 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 dl.kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 8px 0 0; font-size: 14px; }
 dl.kv dt { color: var(--muted); }
 dl.kv dd { margin: 0; font-family: ui-monospace, Menlo, monospace; word-break: break-all; }
+@media (max-width: 500px) {
+  dl.kv { grid-template-columns: 1fr; gap: 2px; }
+  dl.kv dt { margin-top: 6px; }
+  dl.kv dd { overflow-wrap: anywhere; word-break: normal; }
+}
 pre, .mono { font: 12px/1.45 ui-monospace, Menlo, monospace; background: var(--code); border-radius: 8px; padding: 10px; overflow-x: auto; word-break: break-all; white-space: pre-wrap; margin: 8px 0 0; }
 .qr { background: #fff; border-radius: 10px; padding: 8px; width: 220px; max-width: 100%; margin-top: 12px; }
 .qr svg { display: block; width: 100%; height: auto; }
@@ -86,9 +91,9 @@ footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
 <main>
   <header>
     <h1>MUSD Pay Links</h1>
-    <span class="muted">Mezo Buildathon, Access and Distribution track</span>
+    <span class="muted" id="buildathon-meta">Mezo Buildathon, Access and Distribution track</span>
   </header>
-  <p class="lede">A merchant asks for MUSD with a standard EIP-681 link, a QR code or a pay page sent in a chat. Before the payer's wallet or agent builds the transfer, the guard checks that the token is the real MUSD for that chain, that the recipient address is valid, and that the amount is within the payer's limit. A payer who is short of MUSD sees how much BTC would mint it in the MUSD protocol. The merchant finds the payment on chain by its invoice reference.</p>
+  <p class="lede" id="product-intro">A merchant asks for MUSD with a standard EIP-681 link, a QR code or a pay page sent in a chat. Before the payer's wallet or agent builds the transfer, the guard checks that the token is the real MUSD for that chain, that the recipient address is valid, and that the amount is within the payer's limit. A payer who is short of MUSD sees how much BTC would mint it in the MUSD protocol. The merchant finds the payment on chain by its invoice reference.</p>
   <ol class="steps" id="steps">
     <li>Create an invoice in panel 1. Share the QR code or the pay page.</li>
     <li>Check the link as the payer in panel 2. Try the bad links to see the guard refuse them.</li>
@@ -110,6 +115,7 @@ footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
     </dl>
     <div class="qr" id="pv-qr" role="img" aria-label="QR code of this invoice"></div>
     <div class="muted" id="pv-limit" role="note">Your limit is the invoice amount.</div>
+    <p class="muted" id="pv-wallet-note" role="note" hidden>No browser wallet found. Open this page in a browser with your wallet, or scan the QR code.</p>
     <div class="actions">
       <button id="pv-pay" type="button" aria-describedby="pv-status" disabled>Pay with browser wallet</button>
       <button class="ghost" id="pv-check" type="button">Check again</button>
@@ -191,7 +197,7 @@ footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
 
     <section class="panel wide" id="b-panel" aria-labelledby="b-h">
       <h2 id="b-h">4. Payer, get MUSD with BTC (live MUSD protocol)</h2>
-      <p class="sub">MUSD is minted against BTC. This quote reads the live rules from the MUSD protocol contracts on Mezo (BorrowerOperations, TroveManager, PriceFeed and InterestRateManager). It shows the BTC to lock, the fee, the protocol minimum and the liquidation price. Nothing is signed here. The borrow itself happens in the Mezo app.</p>
+      <p class="sub">Lock BTC as collateral to borrow MUSD. This quote reads Mezo’s current borrowing rules. It shows the BTC to lock, full debt, fee, protocol minimum and liquidation price. On testnet, you can review and open one loan here. Mainnet borrowing stays in the Mezo app. A quote is not a transaction.</p>
       <div class="row">
         <div><label for="b-need">MUSD you need</label><input id="b-need" inputmode="decimal" value="25"></div>
         <div><label for="b-ratio">Collateral ratio in percent</label><input id="b-ratio" inputmode="decimal" value="200"></div>
@@ -199,12 +205,31 @@ footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
       </div>
       <div class="actions"><button id="b-go">Get the quote</button></div>
       <div class="out" id="b-out" aria-live="polite"></div>
+      <div id="b-direct" class="note" aria-labelledby="b-direct-h">
+        <h3 id="b-direct-h">Open a Mezo Testnet loan here</h3>
+        <p>Use test BTC only. The protocol minimum can create a debt much larger than a small invoice. Review the complete loan before you approve it.</p>
+        <label for="b-collateral">Test BTC to lock (leave empty to use the quote’s required collateral)</label>
+        <input id="b-collateral" inputmode="decimal" placeholder="For example 0.06" autocomplete="off">
+        <div class="actions"><button id="b-review">Connect wallet and review loan</button><button id="b-open" disabled>Open testnet loan</button><button id="b-loan-check" hidden>Check loan result</button></div>
+        <p id="b-wallet-status" aria-live="polite">Reviewing a loan sends no transaction.</p>
+        <div id="b-loan-review" aria-live="polite"></div>
+        <details class="out" id="b-existing">
+          <summary>Check an existing testnet loan</summary>
+          <p>Read a public loan transaction without connecting a wallet. Values describe the end of its receipt block, not the current position. This check opens no loan.</p>
+          <label for="b-existing-account">Borrower address on Mezo Testnet</label>
+          <input id="b-existing-account" spellcheck="false" autocomplete="off" placeholder="0x…">
+          <label for="b-existing-hash">Loan transaction hash</label>
+          <input id="b-existing-hash" spellcheck="false" autocomplete="off" placeholder="0x…">
+          <div class="actions"><button id="b-existing-go" type="button">Check existing loan (read-only)</button><button id="b-existing-example" class="ghost" type="button">Load project example (26 Oct)</button></div>
+          <div id="b-existing-out" class="out mono" role="status" aria-live="polite">Enter a borrower address and transaction hash, then check the historical result.</div>
+        </details>
+      </div>
     </section>
   </div>
 
   <footer>
     Open source under the MIT license at <a href="https://github.com/theluckystrike/musd-pay-links">github.com/theluckystrike/musd-pay-links</a>.
-    JSON API at <code>/api/check</code>, <code>/api/link</code>, <code>/api/invoices</code>, <code>/api/verify</code>, <code>/api/payments</code>, <code>/api/borrow</code>, <code>/api/token</code>. Built by Michael Lip, Warsaw, Poland.
+    <span id="developer-api">JSON API at <code>/api/check</code>, <code>/api/link</code>, <code>/api/invoices</code>, <code>/api/verify</code>, <code>/api/payments</code>, <code>/api/borrow</code>, <code>/api/token</code>.</span> Built by Michael Lip, Warsaw, Poland.
   </footer>
 </main>
 <script type="module" src="/client.js"></script>

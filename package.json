@@ -1,6 +1,9 @@
 {
   "name": "musd-pay-links",
-  "repository": {"type": "git", "url": "theluckystrike/musd-pay-links.git"},
+  "repository": {
+    "type": "git",
+    "url": "theluckystrike/musd-pay-links.git"
+  },
   "version": "0.1.0",
   "description": "Safe EIP-681 payment links and QR codes for MUSD on Mezo",
   "license": "MIT",
@@ -14,10 +17,13 @@
     "build": "npm run build:client",
     "dev": "npm run build && wrangler dev",
     "deploy": "npm run build && wrangler deploy",
+    "preview": "npm run build && wrangler preview",
     "evidence": "node --experimental-strip-types scripts/evidence.ts",
     "testnet-pay": "node --experimental-strip-types scripts/testnet-pay.ts",
     "testnet-borrow": "node --experimental-strip-types scripts/testnet-borrow.ts",
-    "create-invoice": "node --experimental-strip-types scripts/create-invoice.ts"
+    "create-invoice": "node --experimental-strip-types scripts/create-invoice.ts",
+    "test:runtime": "node scripts/runtime-smoke.mjs",
+    "verify-borrow": "node --experimental-strip-types scripts/verify-borrow.ts"
   },
   "dependencies": {
     "qrcode-generator": "2.0.4",
@@ -27,6 +33,7 @@
     "@cloudflare/workers-types": "4.20260702.1",
     "@types/node": "22.18.0",
     "esbuild": "0.28.2",
+    "playwright": "1.64.1",
     "typescript": "5.9.3",
     "vitest": "5.0.3",
     "wrangler": "4.145.0"
