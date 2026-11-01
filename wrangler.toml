@@ -39,3 +39,24 @@ new_sqlite_classes = ["ClientLimiter"]
 [[migrations]]
 tag = "v2"
 new_sqlite_classes = ["InvoiceStoreDO"]
+
+# Branch Preview data is separate from the production invoice namespace. Durable Object storage
+# is provisioned separately for each Preview by Cloudflare.
+[previews]
+
+[[previews.ratelimits]]
+name = "LIMITER"
+namespace_id = "3161101"
+simple = { limit = 30, period = 60 }
+
+[[previews.kv_namespaces]]
+binding = "INVOICES"
+id = "7762308d5fbb409eb1ccafe4e1b64d3d"
+
+[[previews.durable_objects.bindings]]
+name = "CLIENT_LIMITER"
+class_name = "ClientLimiter"
+
+[[previews.durable_objects.bindings]]
+name = "INVOICE_STORE"
+class_name = "InvoiceStoreDO"

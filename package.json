@@ -17,6 +17,7 @@
     "build": "npm run build:client",
     "dev": "npm run build && wrangler dev",
     "deploy": "npm run build && wrangler deploy",
+    "preview": "npm run build && wrangler preview",
     "evidence": "node --experimental-strip-types scripts/evidence.ts",
     "testnet-pay": "node --experimental-strip-types scripts/testnet-pay.ts",
     "testnet-borrow": "node --experimental-strip-types scripts/testnet-borrow.ts",

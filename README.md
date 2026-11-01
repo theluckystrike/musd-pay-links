@@ -111,7 +111,12 @@ pnpm typecheck
 pnpm build
 pnpm test:runtime    # boots the configured local Worker and checks real HTTP routes
 pnpm deploy          # Cloudflare Workers
+pnpm preview --name sprint-20261101 # isolated branch Preview
 ```
+
+The Preview uses a separate invoice KV namespace and separately provisioned Durable Objects. Its
+configured KV namespace is shared by Previews that use the same ID; use another test namespace when
+they need separate KV data. Preview publication and production rollout have separate receipts.
 
 A read-only command checks an existing testnet loan. It does not create one:
 
