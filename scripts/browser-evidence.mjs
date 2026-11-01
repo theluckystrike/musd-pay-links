@@ -44,6 +44,7 @@ const permissionReviewed = new WeakSet();
 const requestViews = new Map();
 const sidepanelRepresentations = new Map();
 let lastSidepanelScan = 0;
+let activeProductGesture = null;
 const evidence = {
   startedAt: new Date().toISOString(),
   status: 'incomplete',
@@ -80,6 +81,18 @@ async function checkpoint(boundary, detail = {}) {
   evidence.currentStage = stage;
   evidence.lastCheckpoint = { stage, boundary, ...detail, at: new Date().toISOString() };
   await persistEvidence();
+}
+async function beginProductGesture(kind) {
+  check('Only one product wallet gesture is active', activeProductGesture === null);
+  activeProductGesture = { kind, stage, startedAt: new Date().toISOString() };
+  evidence.wallet.activeProductGesture = activeProductGesture;
+  await checkpoint('product-wallet-gesture-started', { kind });
+}
+async function endProductGesture(outcome) {
+  evidence.wallet.lastCompletedProductGesture = { ...activeProductGesture, outcome, finishedAt: new Date().toISOString() };
+  activeProductGesture = null;
+  evidence.wallet.activeProductGesture = null;
+  await checkpoint('product-wallet-gesture-completed', { outcome });
 }
 async function bounded(operation, ms, { watchPump = false } = {}) {
   const until = Math.min(Date.now() + ms, DEADLINE);
@@ -538,6 +551,54 @@ async function publicButtonMetadata(page) {
     return { buttons: [], buttonDiagnosticFailure: { errorClass: errorClass(error), reason: errorReason(error) } };
   }
 }
+async function verifyWalletOrigin(page, kind) {
+  const expected = new URL(ORIGIN);
+  const diagnostic = { kind, route: new URL(page.url()).hash.split('?')[0], expectedOrigin: expected.origin, status: 'unverified' };
+  evidence.wallet.originReviews ??= [];
+  evidence.wallet.originReviews.push(diagnostic);
+  try {
+    check('Origin review contains no recovery or password input', await page.locator('input[type="password"], [data-testid*="srp"], [data-testid*="password"]').count() === 0);
+    const webOrigins = new Set(context.pages().flatMap((candidate) => candidate.frames().map((frame) => frame.url()))
+      .filter((raw) => /^https?:\/\//.test(raw)).map((raw) => new URL(raw).origin));
+    diagnostic.appOrigin = new URL(app.url()).origin;
+    diagnostic.observedWebOrigins = [...webOrigins];
+    diagnostic.activeProductGesture = activeProductGesture?.kind ?? null;
+    const isolatedGesture = diagnostic.appOrigin === expected.origin && webOrigins.size === 1 && webOrigins.has(expected.origin)
+      && activeProductGesture?.stage === stage;
+    if (kind === 'connect') {
+      // v13.55.0 transformOriginToTitle deliberately displays hostname only, without scheme/port.
+      const heading = page.getByTestId('parent-selector-connect-page').locator('.break-words.whitespace-normal').first();
+      const hydrationStarted = Date.now();
+      await waitFor(async () => {
+        diagnostic.displayedHostname = (await heading.innerText({ timeout: 2_000 }).catch((error) => {
+          diagnostic.headingReadFailure = { errorClass: errorClass(error), reason: errorReason(error) };
+          return '';
+        })).trim().slice(0, 250);
+        return diagnostic.displayedHostname !== '' && diagnostic.displayedHostname !== 'Unknown Origin';
+      }, 15_000);
+      diagnostic.hydrationWaitMs = Date.now() - hydrationStarted;
+      diagnostic.publicTitle = await heading.getAttribute('title');
+      diagnostic.uiLimit = 'Connect displays hostname only. It does not expose scheme or port; those are checked through the real app URL, isolated web origin and one active product gesture.';
+      diagnostic.persistedOrControllerStateRead = false;
+      diagnostic.verified = isolatedGesture && diagnostic.displayedHostname === expected.hostname;
+    } else {
+      // PersonalSignInfo passes its origin to ConfirmInfoRowUrl: host:port plus HTTP badge.
+      const origin = page.getByTestId('confirmation__details-origin');
+      await origin.waitFor({ state: 'visible', timeout: 15_000 });
+      diagnostic.displayedHostAndPort = (await origin.innerText()).trim().slice(0, 250);
+      diagnostic.httpBadgeVisible = await origin.locator('..').getByText('HTTP', { exact: true }).isVisible().catch(() => false);
+      diagnostic.verified = isolatedGesture && diagnostic.displayedHostAndPort === expected.host
+        && expected.protocol === 'http:' && diagnostic.httpBadgeVisible;
+    }
+    diagnostic.status = diagnostic.verified ? 'verified-from-public-ui-and-isolated-product-context' : 'origin-mismatch';
+  } catch (error) {
+    diagnostic.errorClass = errorClass(error);
+    diagnostic.reason = errorReason(error);
+  }
+  await checkpoint('wallet-origin-reviewed', { kind, verified: diagnostic.verified === true });
+  if (!diagnostic.verified) await publicWalletShot(page, `wallet-${kind}-origin-unverified`).catch(() => {});
+  return diagnostic.verified === true;
+}
 async function selectTaskAccountPermissions(page) {
   if (permissionReviewed.has(page) || !(await visible(page, 'account-selection-section'))) return;
   await bounded(async () => {
@@ -615,11 +676,11 @@ async function confirmationPump() {
         };
         if (actedRequests.has(key)) continue;
         if (kind === 'connect' || kind === 'signature') {
-          check(`Wallet ${kind} belongs to the local test application`, /127\.0\.0\.1|localhost/.test(text));
+          check(`Wallet ${kind} belongs to the local test application`, await verifyWalletOrigin(page, kind));
         }
         if (kind === 'connect') await selectTaskAccountPermissions(page);
         if (kind === 'signature') {
-          check('Signed content names MUSD invoice creation', /MUSD Pay Links|create invoice/i.test(text));
+          check('Signed content names MUSD invoice creation', /MUSD Pay Links|create invoice/i.test(await page.locator('body').innerText()));
         }
         if (kind === 'network') {
           check('Wallet network request is Mezo Testnet', /Mezo Testnet|31611/.test(text));
@@ -843,6 +904,7 @@ try {
   const invoiceResponse = app.waitForResponse((r) => new URL(r.url()).pathname === '/api/invoices' && r.request().method() === 'POST', { timeout: 90_000 });
   invoiceResponse.catch(() => {}); // A preceding UI failure must not leave an unhandled response waiter.
   evidence.wallet.connectionGesture = 'Normal product Create invoice button; harness issues no connection request';
+  await beginProductGesture('create-invoice');
   await checkpoint('merchant-invoice-ui-submit');
   await app.locator('#m-go').click();
   const createdResponse = await bounded(() => invoiceResponse, 90_000, { watchPump: true });
@@ -853,6 +915,7 @@ try {
   evidence.invoice = created.invoice;
   await connectedAccount(merchant); // Read-only observation after the product's normal connection/signature.
   evidence.wallet.chainBeforePayment = await providerRequest('eth_chainId');
+  await endProductGesture('signed-invoice-created');
   await appShot('01-signed-invoice');
   await chooseAccount('Account 1');
   await connectedAccount(payer); // Both task accounts were permitted through the actual Connect UI.
@@ -867,10 +930,12 @@ try {
   confirmMode = 'reject-once';
   await app.bringToFront();
   await recordExtensionTargets('before-product-payer-gesture');
+  await beginProductGesture('pay-rejection-check');
   await checkpoint('rejected-payment-ui-request');
   await app.locator('#pv-pay').click();
   await waitFor(async () => transactionRejections === 1 && /rejected/i.test(await app.locator('#pv-out').innerText()), 90_000);
   check('Explicit wallet rejection leaves no project transaction', await client.getTransactionCount({ address: payer, blockTag: 'pending' }) === nonceBefore);
+  await endProductGesture('payment-explicitly-rejected');
   await waitFor(async () => !(await app.locator('#pv-pay').isDisabled()));
   evidence.wallet.chainAfterConnection = await providerRequest('eth_chainId');
   check('Client selected Mezo Testnet before a payment request', Number(evidence.wallet.chainAfterConnection) === CHAIN_ID);
@@ -885,6 +950,7 @@ try {
   await persistEvidence();
   confirmMode = 'pay-once';
   await app.bringToFront();
+  await beginProductGesture('pay-invoice');
   await checkpoint('payment-ui-request');
   await app.locator('#pv-pay').click();
   const hash = await waitFor(async () => {
@@ -894,6 +960,7 @@ try {
   evidence.payment = { hash, sender: payer, recipient: merchant, amount: amountText, reference: created.invoice.memo, chainId: CHAIN_ID, sentFromActualBrowserWallet: true };
   evidence.paymentDispatch = 'transaction hash observed; verification pending';
   await persistEvidence();
+  await endProductGesture('transaction-hash-observed');
   check('Only one transaction was approved', transactionApprovals === 1);
   await setStage('verify-on-chain');
   const receipt = await client.waitForTransactionReceipt({ hash, confirmations: 5, timeout: 150_000, pollingInterval: 2_000 });
