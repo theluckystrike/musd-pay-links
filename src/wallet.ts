@@ -82,6 +82,21 @@ export async function connectPaymentWallet(provider: Eip1193, chain: MezoChain):
     await switchChain();
   }
 
+  // Some wallets expose an account globally while authorizing signing separately for each chain.
+  // Ask for normal account consent after network selection; eth_requestAccounts can otherwise
+  // return an existing connection without granting that account on the newly added chain.
+  try {
+    const permissions = await provider.request({ method: "wallet_requestPermissions", params: [{ eth_accounts: {} }] });
+    if (!Array.isArray(permissions) || permissions.length === 0 || permissions.some((permission) =>
+      !permission || typeof permission !== "object" || typeof permission.parentCapability !== "string") ||
+      !permissions.some((permission) => permission.parentCapability === "eth_accounts")) {
+      throw new Error("The wallet did not confirm account permission. No payment was requested.");
+    }
+  } catch (error) {
+    // Older providers may not implement EIP-2255. Every other permission error stops before send.
+    if (errorCode(error) !== 4200 && errorCode(error) !== -32601) throw error;
+  }
+
   let changed = false;
   let requested = false;
   let closed = false;

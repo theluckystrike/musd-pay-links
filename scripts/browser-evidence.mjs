@@ -40,7 +40,7 @@ let walletPromptActions = 0;
 let pumpPromise;
 let evidenceWrite = Promise.resolve();
 const actedRequests = new Set();
-const permissionReviewed = new WeakSet();
+const permissionReviewed = new Set();
 const requestViews = new Map();
 const sidepanelRepresentations = new Map();
 let lastSidepanelScan = 0;
@@ -824,7 +824,10 @@ async function verifyWalletOrigin(page, kind, snapshot) {
   return diagnostic.verified === true;
 }
 async function selectTaskAccountPermissions(page, snapshot) {
-  if (permissionReviewed.has(page) || !(await visible(page, 'account-selection-section'))) return;
+  // A normal consent tab can represent successive Connect requests. Review each opaque request
+  // once, rather than treating the tab itself as already authorized for every future request.
+  const requestIdentity = snapshot.route;
+  if (permissionReviewed.has(requestIdentity) || !(await visible(page, 'account-selection-section'))) return;
   await bounded(async () => {
     if (snapshot) await requireFreshConsent(page, snapshot);
     walletPromptActions++;
@@ -854,7 +857,7 @@ async function selectTaskAccountPermissions(page, snapshot) {
     if (!pumpRunning) throw new Error('Wallet review stopped');
     await page.getByTestId('connect-more-accounts-button').click();
     await page.getByTestId('accounts-count-2').waitFor({ state: 'visible' });
-    permissionReviewed.add(page);
+    permissionReviewed.add(requestIdentity);
     evidence.wallet.accountPermissions = { method: 'Normal Connect edit-accounts UI', accounts: [evidence.accounts.merchant, evidence.accounts.payer], onlyTaskAccounts: true };
   }, 30_000, { watchPump: true });
 }

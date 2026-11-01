@@ -17,6 +17,10 @@ class Provider implements Eip1193 {
   switchChangesChain = true;
   sendResult: unknown = HASH;
   sendError: unknown;
+  permissionError: unknown;
+  permissionResult: unknown = [{ parentCapability: "eth_accounts" }];
+  authorizedChain: string | undefined;
+  requireScopedPermission = false;
   calls: { method: string; params?: unknown[] }[] = [];
   listeners = new Map<string, Set<(...args: unknown[]) => void>>();
   beforeRead?: (method: string) => void;
@@ -40,7 +44,12 @@ class Provider implements Eip1193 {
         if (this.switchChangesChain) this.chain = (args.params![0] as { chainId: string }).chainId;
         return null;
       case "wallet_addEthereumChain": this.unknown = false; return null; // Deliberately does not select it.
+      case "wallet_requestPermissions":
+        if (this.permissionError) throw this.permissionError;
+        this.authorizedChain = this.chain;
+        return this.permissionResult;
       case "eth_sendTransaction":
+        if (this.requireScopedPermission && this.authorizedChain !== this.chain) throw { code: 4100 };
         if (this.sendError) throw this.sendError;
         return this.sendResult;
       default: throw new Error("Unexpected provider method " + args.method);
@@ -73,6 +82,56 @@ describe("payment wallet network and account binding", () => {
     expect(provider.chain).toBe(CHAIN);
     expect(await session.send(transfer())).toMatchObject({ status: "sent" });
     session.close();
+  });
+
+  it("grants account permission on the selected chain before creating a payable session", async () => {
+    const provider = new Provider(); provider.unknown = true; provider.requireScopedPermission = true;
+    const session = await connectPaymentWallet(provider, MEZO_TESTNET);
+    expect(provider.calls.map((call) => call.method)).toEqual([
+      "eth_requestAccounts", "wallet_switchEthereumChain", "wallet_addEthereumChain", "wallet_switchEthereumChain",
+      "wallet_requestPermissions", "eth_chainId", "eth_accounts",
+    ]);
+    expect(provider.calls[4]!.params).toEqual([{ eth_accounts: {} }]);
+    expect(provider.authorizedChain).toBe(CHAIN);
+    expect(await session.send(transfer())).toMatchObject({ status: "sent" });
+    session.close();
+  });
+
+  it.each([4001, 4100, -32602, -32002, 4902])("stops permission error %i before any send", async (code) => {
+    const provider = new Provider(); provider.permissionError = { code };
+    await expect(connectPaymentWallet(provider, MEZO_TESTNET)).rejects.toMatchObject({ code });
+    expect(provider.calls.some((call) => call.method === "eth_sendTransaction")).toBe(false);
+    expect(provider.listeners.size).toBe(0);
+  });
+
+  it.each([null, {}, [], ["eth_accounts"], [{ parentCapability: "other" }], [{ parentCapability: "eth_accounts" }, null]])(
+    "stops malformed permission reply %j before any send", async (permissionResult) => {
+      const provider = new Provider(); provider.permissionResult = permissionResult;
+      await expect(connectPaymentWallet(provider, MEZO_TESTNET)).rejects.toThrow("did not confirm account permission");
+      expect(provider.calls.some((call) => call.method === "eth_sendTransaction")).toBe(false);
+    },
+  );
+
+  it.each(["account", "chain"])("refuses a changed %s during permission consent", async (changed) => {
+    const provider = new Provider();
+    provider.beforeRead = (method) => {
+      if (method === "wallet_requestPermissions") {
+        if (changed === "account") provider.accounts = [OTHER];
+        else provider.chain = "0x1";
+      }
+    };
+    await expect(connectPaymentWallet(provider, MEZO_TESTNET)).rejects.toThrow(changed === "account" ? "account changed" : "not connected");
+    expect(provider.calls.some((call) => call.method === "eth_sendTransaction")).toBe(false);
+  });
+
+  it.each([4200, -32601])("supports legacy permission error %i with required readback", async (code) => {
+    const provider = new Provider(); provider.permissionError = { code };
+    const session = await connectPaymentWallet(provider, MEZO_TESTNET);
+    expect(provider.calls.slice(-2).map((call) => call.method)).toEqual(["eth_chainId", "eth_accounts"]);
+    expect(await session.send(transfer())).toMatchObject({ status: "sent" });
+    session.close();
+    const wrongChain = new Provider(); wrongChain.permissionError = { code }; wrongChain.switchChangesChain = false;
+    await expect(connectPaymentWallet(wrongChain, MEZO_TESTNET)).rejects.toThrow("not connected");
   });
 
   it("refuses a wallet that claims a switch without selecting the required network", async () => {
@@ -200,6 +259,16 @@ describe("payment wallet network and account binding", () => {
 });
 
 describe("one wallet submission and uncertain outcomes", () => {
+  it("keeps a send-time unauthorized reply unknown and forbids another send", async () => {
+    const provider = new Provider(); provider.sendError = { code: 4100 };
+    const session = await connectPaymentWallet(provider, MEZO_TESTNET);
+    let marked = 0;
+    expect(await session.send(transfer(), () => { marked++; })).toMatchObject({ status: "unknown" });
+    await expect(session.send(transfer())).rejects.toThrow("already requested");
+    expect(marked).toBe(1);
+    expect(provider.calls.filter((call) => call.method === "eth_sendTransaction")).toHaveLength(1);
+    session.close();
+  });
   it("allows only one request when two callers start concurrently", async () => {
     const provider = new Provider(); const session = await connectPaymentWallet(provider, MEZO_TESTNET);
     const results = await Promise.allSettled([session.send(transfer()), session.send(transfer())]);
