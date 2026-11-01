@@ -43,6 +43,8 @@ const acted = new WeakMap();
 const evidence = {
   startedAt: new Date().toISOString(),
   status: 'incomplete',
+  currentStage: stage,
+  lastCheckpoint: { stage, boundary: 'harness-initialized', at: new Date().toISOString() },
   chainId: CHAIN_ID,
   token: TOKEN,
   origin: ORIGIN,
@@ -51,6 +53,7 @@ const evidence = {
   checks: [],
   images: [],
   walletActionJournal: [],
+  providerRequests: [],
   extensionPageErrors: [],
   limits: [
     'Both accounts and all funds are project-owned testnet test data.',
@@ -62,9 +65,58 @@ function check(name, passed, detail = undefined) {
   evidence.checks.push({ name, passed: Boolean(passed), ...(detail === undefined ? {} : { detail }) });
   assert(passed, name);
 }
-function setStage(name) {
+async function setStage(name) {
   stage = name;
+  evidence.currentStage = name;
+  evidence.lastCheckpoint = { stage: name, boundary: 'stage-entered', at: new Date().toISOString() };
+  await persistEvidence();
   console.log(`browser-evidence stage: ${name}`);
+}
+async function checkpoint(boundary, detail = {}) {
+  evidence.currentStage = stage;
+  evidence.lastCheckpoint = { stage, boundary, ...detail, at: new Date().toISOString() };
+  await persistEvidence();
+}
+async function bounded(operation, ms, { watchPump = false } = {}) {
+  const until = Math.min(Date.now() + ms, DEADLINE);
+  if (watchPump && pumpError) throw pumpError;
+  const timeoutError = () => Object.assign(new Error('Bounded browser operation timed out'), { name: 'TimeoutError' });
+  if (until <= Date.now()) throw timeoutError();
+  let timer;
+  const guard = new Promise((_, reject) => {
+    const poll = () => {
+      if (watchPump && pumpError) return reject(pumpError);
+      const remaining = until - Date.now();
+      if (remaining <= 0) return reject(timeoutError());
+      timer = setTimeout(poll, Math.min(remaining, 250));
+    };
+    poll();
+  });
+  try { return await Promise.race([Promise.resolve().then(operation), guard]); }
+  finally { clearTimeout(timer); }
+}
+async function providerRequest(method) {
+  assert(['eth_requestAccounts', 'eth_chainId'].includes(method), 'Only reviewed provider methods are permitted');
+  const timeoutMs = method === 'eth_requestAccounts' ? 90_000 : 15_000;
+  const request = { method, stage, status: 'pending', timeoutMs, startedAt: new Date().toISOString() };
+  evidence.providerRequests.push(request);
+  await checkpoint('provider-request-started', { method, timeoutMs });
+  try {
+    const result = await bounded(() => app.evaluate(async (requestedMethod) => await window.ethereum.request({ method: requestedMethod }), method), timeoutMs, { watchPump: true });
+    request.status = 'resolved';
+    request.finishedAt = new Date().toISOString();
+    await checkpoint('provider-request-resolved', { method });
+    return result;
+  } catch (error) {
+    request.status = errorReason(error) === 'timeout' ? 'timed-out' : 'failed';
+    request.finishedAt = new Date().toISOString();
+    request.errorClass = errorClass(error);
+    request.reason = errorReason(error);
+    request.limit = 'Outer wait ended; an in-flight provider request is not cancelled or retried. Wallet action attempts remain recorded separately.';
+    pumpRunning = false;
+    await checkpoint('provider-request-incomplete', { method, reason: request.reason });
+    throw error;
+  }
 }
 function errorClass(error) {
   // Error names can be application-controlled; publish only standard class names.
@@ -96,7 +148,7 @@ async function persistEvidence() {
 async function journalWalletAction(kind, action) {
   evidence.walletActionJournal.push({ kind, action, stage, origin: ORIGIN, chainId: CHAIN_ID,
     ...(evidence.wallet.selectedAccount ? { account: evidence.wallet.selectedAccount } : {}), at: new Date().toISOString() });
-  await persistEvidence();
+  await checkpoint('wallet-action-attempt-recorded-before-click', { kind, action });
 }
 function isExtensionPage(page) {
   return !page.isClosed() && page.url().startsWith(`chrome-extension://${extensionId}/`);
@@ -104,47 +156,36 @@ function isExtensionPage(page) {
 async function pageMetadata(page) {
   const url = new URL(page.url());
   const metadata = { pathname: url.pathname, route: url.hash.split('?')[0], isHarnessWalletPage: page === wallet };
+  let session;
   try {
-    metadata.elements = await page.locator('*').evaluateAll((nodes) => nodes.map((node) => ({
-      id: node.getAttribute('data-testid'), tag: node.tagName, type: node.getAttribute('type'),
-      visible: typeof node.getClientRects === 'function' && node.getClientRects().length > 0,
-    })));
-    metadata.method = 'Playwright DOM metadata projection';
-    metadata.nodeCount = metadata.elements.length;
+    session = await context.newCDPSession(page);
+    // CDP's raw document stays in memory. Never persist attributes, values, text or snapshots.
+    const document = await Promise.race([
+      session.send('DOM.getDocument', { depth: -1, pierce: false }),
+      sleep(5_000).then(() => { throw new Error('Metadata collection timeout'); }),
+    ]);
+    const pending = [document.root];
+    const elements = [];
+    while (pending.length) {
+      const node = pending.pop();
+      if (node.nodeType === 1) {
+        let id = null;
+        let type = null;
+        for (let i = 0; i < (node.attributes?.length ?? 0); i += 2) {
+          if (node.attributes[i] === 'data-testid') id = node.attributes[i + 1];
+          if (node.attributes[i] === 'type') type = node.attributes[i + 1];
+        }
+        elements.push({ id, tag: node.nodeName, type });
+      }
+      if (node.children) pending.push(...node.children);
+    }
+    metadata.method = 'CDP DOM.getDocument metadata projection; visibility not collected';
+    metadata.elements = elements;
+    metadata.nodeCount = elements.length;
   } catch (error) {
     metadata.collectionErrorClass = errorClass(error);
     metadata.collectionErrorReason = errorReason(error);
-    let session;
-    try {
-      session = await context.newCDPSession(page);
-      // CDP's raw document stays in memory. Never persist attributes, values, text or snapshots.
-      const document = await Promise.race([
-        session.send('DOM.getDocument', { depth: -1, pierce: false }),
-        sleep(5_000).then(() => { throw new Error('Metadata collection timeout'); }),
-      ]);
-      const pending = [document.root];
-      const elements = [];
-      while (pending.length) {
-        const node = pending.pop();
-        if (node.nodeType === 1) {
-          let id = null;
-          let type = null;
-          for (let i = 0; i < (node.attributes?.length ?? 0); i += 2) {
-            if (node.attributes[i] === 'data-testid') id = node.attributes[i + 1];
-            if (node.attributes[i] === 'type') type = node.attributes[i + 1];
-          }
-          elements.push({ id, tag: node.nodeName, type });
-        }
-        if (node.children) pending.push(...node.children);
-      }
-      metadata.method = 'CDP DOM.getDocument metadata projection; visibility not collected';
-      metadata.elements = elements;
-      metadata.nodeCount = elements.length;
-    } catch (fallbackError) {
-      metadata.fallbackErrorClass = errorClass(fallbackError);
-      metadata.fallbackErrorReason = errorReason(fallbackError);
-    } finally { if (session) await session.detach().catch(() => {}); }
-  }
+  } finally { if (session) await session.detach().catch(() => {}); }
   return metadata;
 }
 function observePageErrors(page) {
@@ -193,7 +234,7 @@ async function waitFor(fn, ms = 30_000, interval = 250) {
   const until = Math.min(Date.now() + ms, DEADLINE);
   while (Date.now() < until) {
     if (pumpError) throw pumpError;
-    const result = await fn();
+    const result = await bounded(fn, until - Date.now(), { watchPump: true });
     if (result) return result;
     await sleep(interval);
   }
@@ -224,10 +265,10 @@ async function publicWalletShot(page, name) {
   evidence.images.push(file);
 }
 async function importWallet(mnemonic, password) {
-  setStage('wallet-import');
+  await setStage('wallet-import');
   // Production onInstall opens its own tab. Reuse it instead of creating a second onboarding UI.
   await wallet.getByTestId('onboarding-import-wallet').click();
-  setStage('wallet-existing-login');
+  await setStage('wallet-existing-login');
   const note = wallet.getByTestId('srp-input-import__srp-note');
   let selectedSrp = false;
   // WelcomeLogin waits100ms before rendering login=existing options. An immediate isVisible check
@@ -244,7 +285,7 @@ async function importWallet(mnemonic, password) {
     await option.click();
     return false;
   }, 45_000);
-  setStage('wallet-srp-entry');
+  await setStage('wallet-srp-entry');
   // Word-by-word entry matches MetaMask's own onboarding page object. The secret is never logged.
   const words = mnemonic.trim().split(/\s+/);
   secretEntryStarted = true; // Set BEFORE any secret fill; a failed fill can still have entered bytes.
@@ -256,14 +297,15 @@ async function importWallet(mnemonic, password) {
     if (i < words.length - 1) await input.press('Space');
   }
   await wallet.getByTestId('import-srp-confirm').click();
-  setStage('wallet-password');
+  await setStage('wallet-password');
   secretEntryStarted = true;
   await wallet.getByTestId('create-password-new-input').fill(password);
   await wallet.getByTestId('create-password-confirm-input').fill(password);
   await wallet.getByTestId('create-password-terms').click();
   await waitFor(async () => !(await wallet.getByTestId('create-password-submit').isDisabled()));
+  await checkpoint('onboarding-password-submit');
   await wallet.getByTestId('create-password-submit').click();
-  setStage('wallet-onboarding-finish');
+  await setStage('wallet-onboarding-finish');
   let doneClicked = false;
   let doneReadySince = 0;
   let homeNavigationAttempted = false;
@@ -304,6 +346,7 @@ async function importWallet(mnemonic, password) {
       if (Date.now() - doneReadySince < 2_000) return false;
       doneClicked = true;
       evidence.wallet.onboardingDoneAttempts = 1;
+      await checkpoint('normal-onboarding-done-click');
       await done.click();
       return false;
     }
@@ -315,6 +358,7 @@ async function importWallet(mnemonic, password) {
       evidence.wallet.postDoneHomeNavigationAttempts = 1;
       evidence.wallet.postDoneSettlingMs = 1_500;
       await sleep(1_500);
+      await checkpoint('normal-home-navigation-after-done');
       await wallet.goto(`chrome-extension://${extensionId}/home.html`);
       return false;
     }
@@ -335,15 +379,16 @@ async function importWallet(mnemonic, password) {
 }
 async function chooseAccount(label, { create = false } = {}) {
   const accountStage = `select-${label.replaceAll(' ', '-').toLowerCase()}`;
-  setStage(`${accountStage}-open-list`);
+  await setStage(`${accountStage}-open-list`);
   await wallet.bringToFront();
   if (!(await visible(wallet, 'account-menu-icon'))) await wallet.goto(`chrome-extension://${extensionId}/home.html`);
+  await checkpoint('account-menu-open');
   await wallet.getByTestId('account-menu-icon').click();
   // HeaderNavbar.openAccountMenu in the pinned release waits for this page before using its rows.
   await wallet.getByTestId('parent-selector-account-list-page').waitFor({ state: 'visible' });
   const target = wallet.getByTestId(`multichain-account-cell-name-${label}`);
   if (create && !(await target.isVisible())) {
-    setStage(`${accountStage}-wait-create-ready`);
+    await setStage(`${accountStage}-wait-create-ready`);
     const add = wallet.getByTestId('add-multichain-account-button').first();
     let readySince = 0;
     // AddMultichainAccount is a DIV, not a disabled button. While syncing its handler is a no-op.
@@ -361,17 +406,19 @@ async function chooseAccount(label, { create = false } = {}) {
       return Date.now() - readySince >= 1_000 ? 'create' : false;
     }, 60_000);
     if (ready === 'create') {
-      setStage(`${accountStage}-create-once`);
+      await setStage(`${accountStage}-create-once`);
       evidence.wallet.accountCreationAttempts = (evidence.wallet.accountCreationAttempts ?? 0) + 1;
       check('Only one account-creation UI click is attempted', evidence.wallet.accountCreationAttempts === 1);
+      await checkpoint('account-create-ui-click');
       await add.click();
     }
   }
-  setStage(`${accountStage}-wait-row`);
+  await setStage(`${accountStage}-wait-row`);
   await target.waitFor({ state: 'visible', timeout: 60_000 });
-  setStage(`${accountStage}-select-row`);
+  await setStage(`${accountStage}-select-row`);
+  await checkpoint('account-select-ui-click');
   await target.click();
-  setStage(`${accountStage}-verify-selection`);
+  await setStage(`${accountStage}-verify-selection`);
   await waitFor(async () => await visible(wallet, 'account-menu-icon')
     && (await wallet.getByTestId('account-menu-icon').innerText()).includes(label), 45_000);
   check(`MetaMask selected ${label}`, true);
@@ -385,6 +432,24 @@ function classifyConfirmation(text, url) {
   if (/Transaction request|Transaction|Send|Transfer/i.test(text) && /confirm/i.test(text)) return 'transaction';
   return 'unknown';
 }
+async function publicButtonMetadata(page) {
+  try {
+    return { buttons: await bounded(async () => {
+      const buttons = page.locator('button');
+      const count = Math.min(await buttons.count(), 25);
+      const records = [];
+      for (let i = 0; i < count; i++) {
+        const button = buttons.nth(i);
+        // Normal locator methods run in Playwright's utility world, avoiding LavaMoat globals.
+        records.push({ id: await button.getAttribute('data-testid'), text: (await button.innerText()).slice(0, 80), disabled: await button.isDisabled() });
+      }
+      return records;
+    }, 5_000) };
+  } catch (error) {
+    // Optional public diagnostics must never prevent essential review and approval checks.
+    return { buttons: [], buttonDiagnosticFailure: { errorClass: errorClass(error), reason: errorReason(error) } };
+  }
+}
 async function confirmationPump() {
   while (pumpRunning && Date.now() < DEADLINE) {
     for (const page of context.pages()) {
@@ -392,9 +457,12 @@ async function confirmationPump() {
       const url = page.url();
       if (!url.startsWith(`chrome-extension://${extensionId}/`)) continue;
       if (!/(?:notification|home)\.html/.test(url)) continue;
+      let reviewKind = 'unknown';
+      let actionAttempted = false;
       try {
         const text = await page.locator('body').innerText({ timeout: 1500 });
         const kind = classifyConfirmation(text, url);
+        reviewKind = kind;
         if (kind === 'forbidden') throw new Error('Unexpected sensitive wallet screen');
         if (kind === 'unknown') continue; // Never blindly approve an unfamiliar screen.
         if (confirmMode === 'feature-absence') throw new Error('A wallet prompt appeared during the missing-Web-Locks check');
@@ -407,11 +475,7 @@ async function confirmationPump() {
           kind,
           title,
           // Only public button labels/identifiers. No input values, raw error stack or whole DOM.
-          buttons: await page.locator('button').evaluateAll((buttons) => buttons.slice(0, 25).map((button) => ({
-            id: button.getAttribute('data-testid'),
-            text: button.innerText.slice(0, 80),
-            disabled: button.disabled,
-          }))),
+          ...await publicButtonMetadata(page),
         };
         if (acted.get(page) === key) continue;
         if (kind === 'connect' || kind === 'signature') {
@@ -425,16 +489,17 @@ async function confirmationPump() {
         }
         if (kind === 'transaction') {
           check('Only the authorized testnet payment reaches wallet approval', ['reject-once', 'pay-once'].includes(confirmMode));
-          const walletChain = await app.evaluate(async () => await window.ethereum.request({ method: 'eth_chainId' }));
+          const walletChain = await providerRequest('eth_chainId');
           check('Wallet remains on Mezo Testnet at the confirmation action', Number(walletChain) === CHAIN_ID);
           if (confirmMode === 'reject-once') {
-            if (!pumpRunning) return;
+            if (!pumpRunning || Date.now() >= DEADLINE) return;
             if (transactionRejections !== 0) throw new Error('More than one rejection request');
             acted.set(page, key); // Save the attempt before the action, even if the window closes early.
             transactionRejections++;
             walletPromptActions++;
             await journalWalletAction(kind, 'reject');
-            if (!pumpRunning) return;
+            if (!pumpRunning || Date.now() >= DEADLINE) return;
+            actionAttempted = true;
             await page.getByTestId('confirm-footer-cancel-button').click();
             continue;
           }
@@ -447,32 +512,39 @@ async function confirmationPump() {
           ? page.locator('[data-testid="confirm-btn"], [data-testid="page-container-footer-next"]:visible').first()
           : page.getByTestId('confirm-footer-button');
         if (!(await confirm.isVisible().catch(() => false)) || await confirm.isDisabled()) continue;
-        if (!pumpRunning) return;
+        if (!pumpRunning || Date.now() >= DEADLINE) return;
         acted.set(page, key);
         if (kind === 'signature') signatureApprovals++;
         if (kind === 'transaction') transactionApprovals++;
         walletPromptActions++;
         await journalWalletAction(kind, 'approve');
-        if (!pumpRunning) return;
+        if (!pumpRunning || Date.now() >= DEADLINE) return;
+        actionAttempted = true;
         await confirm.click();
       } catch (error) {
-        if (!page.isClosed() && !(error?.message ?? '').includes('Target page, context or browser has been closed')) {
-          pumpError = new Error('Wallet confirmation did not complete safely');
-          evidence.confirmationFailure = { kind: 'ui-review-failed' };
-          return;
-        }
+        const reason = errorReason(error);
+        // A reviewed popup may close during its journaled action. Keep earlier substantive failures
+        // even if the target then closes; never replace their safe class/reason with a closure error.
+        if (reason === 'target-closed' && (actionAttempted || !pumpRunning)) continue;
+        const failure = { kind: 'ui-review-failed', reviewKind, stage, errorClass: errorClass(error), reason, targetClosed: page.isClosed(), at: new Date().toISOString() };
+        evidence.firstPumpError ??= failure;
+        evidence.confirmationFailure ??= failure;
+        pumpError ??= new Error('Wallet confirmation did not complete safely');
+        pumpRunning = false;
+        await checkpoint('wallet-pump-failed', { reviewKind, reason });
+        return;
       }
     }
     await sleep(250);
   }
 }
 async function connectedAccount(expected) {
-  const accounts = await app.evaluate(async () => await window.ethereum.request({ method: 'eth_requestAccounts' }));
+  const accounts = await providerRequest('eth_requestAccounts');
   check('Dapp sees the expected task-only selected account', Array.isArray(accounts) && accounts[0]?.toLowerCase() === expected.toLowerCase(), { selected: Array.isArray(accounts) ? accounts[0] : null });
 }
 
 async function verifyMissingWebLocks(client, payer, payURL, memo) {
-  setStage('feature-absence-web-locks');
+  await setStage('feature-absence-web-locks');
   const previousMode = confirmMode;
   confirmMode = 'feature-absence';
   const beforeActions = { walletPromptActions, transactionRejections, transactionApprovals, signatureApprovals };
@@ -517,6 +589,7 @@ async function verifyMissingWebLocks(client, payer, payURL, memo) {
     await waitFor(async () => !(await noLocks.locator('#pv-pay').isDisabled()), 60_000);
     const attemptKey = `musd-sent:${CHAIN_ID}:${memo}`;
     const storedBefore = await noLocks.evaluate((key) => localStorage.getItem(key), attemptKey);
+    await checkpoint('feature-absence-pay-ui-click');
     await noLocks.locator('#pv-pay').click();
     await waitFor(async () => /cannot coordinate invoice payments across tabs/i.test(await noLocks.locator('#pv-out').innerText()), 15_000);
     record.message = await noLocks.locator('#pv-out').innerText();
@@ -623,15 +696,16 @@ try {
   check('Dapp uses real MetaMask injection', await app.evaluate(() => window.ethereum.isMetaMask === true));
   pumpRunning = true;
   pumpPromise = confirmationPump();
-  setStage('connect-merchant');
+  await setStage('connect-merchant');
   await connectedAccount(merchant);
-  const chainBefore = await app.evaluate(async () => await window.ethereum.request({ method: 'eth_chainId' }));
+  const chainBefore = await providerRequest('eth_chainId');
   evidence.wallet.chainBeforePayment = chainBefore;
-  setStage('create-signed-invoice');
+  await setStage('create-signed-invoice');
   await app.locator('#m-chain').selectOption(String(CHAIN_ID));
   await app.locator('#m-to').fill(merchant);
   await app.locator('#m-amount').fill(amountText);
   const invoiceResponse = app.waitForResponse((r) => new URL(r.url()).pathname === '/api/invoices' && r.request().method() === 'POST', { timeout: 90_000 });
+  await checkpoint('merchant-invoice-ui-submit');
   await app.locator('#m-go').click();
   const createdResponse = await invoiceResponse;
   const created = await createdResponse.json();
@@ -649,16 +723,17 @@ try {
   await waitFor(async () => !(await app.locator('#pv-pay').isDisabled()), 60_000);
   await appShot('02-open-invoice');
   const nonceBefore = await client.getTransactionCount({ address: payer, blockTag: 'pending' });
-  setStage('reject-one-payment');
+  await setStage('reject-one-payment');
   confirmMode = 'reject-once';
+  await checkpoint('rejected-payment-ui-request');
   await app.locator('#pv-pay').click();
   await waitFor(async () => transactionRejections === 1 && /rejected/i.test(await app.locator('#pv-out').innerText()), 90_000);
   check('Explicit wallet rejection leaves no project transaction', await client.getTransactionCount({ address: payer, blockTag: 'pending' }) === nonceBefore);
   await waitFor(async () => !(await app.locator('#pv-pay').isDisabled()));
-  evidence.wallet.chainAfterConnection = await app.evaluate(async () => await window.ethereum.request({ method: 'eth_chainId' }));
+  evidence.wallet.chainAfterConnection = await providerRequest('eth_chainId');
   check('Client selected Mezo Testnet before a payment request', Number(evidence.wallet.chainAfterConnection) === CHAIN_ID);
   await appShot('03-wallet-rejected');
-  setStage('send-one-payment');
+  await setStage('send-one-payment');
   const [preNonce, preBlock, preNative, preToken] = await Promise.all([
     client.getTransactionCount({ address: payer, blockTag: 'pending' }), client.getBlockNumber(),
     client.getBalance({ address: payer }),
@@ -667,6 +742,7 @@ try {
   evidence.prePayment = { at: new Date().toISOString(), pendingNonce: preNonce, block: preBlock.toString(), nativeBalance: preNative.toString(), musdBalance: preToken.toString(), invoiceReference: created.invoice.memo };
   await persistEvidence();
   confirmMode = 'pay-once';
+  await checkpoint('payment-ui-request');
   await app.locator('#pv-pay').click();
   const hash = await waitFor(async () => {
     const hrefs = await app.locator('#pv-out a[href]').evaluateAll((links) => links.map((a) => a.href));
@@ -676,7 +752,7 @@ try {
   evidence.paymentDispatch = 'transaction hash observed; verification pending';
   await persistEvidence();
   check('Only one transaction was approved', transactionApprovals === 1);
-  setStage('verify-on-chain');
+  await setStage('verify-on-chain');
   const receipt = await client.waitForTransactionReceipt({ hash, confirmations: 5, timeout: 150_000, pollingInterval: 2_000 });
   const transaction = await client.getTransaction({ hash });
   check('Receipt succeeded on testnet', receipt.status === 'success' && await client.getChainId() === CHAIN_ID);
@@ -696,12 +772,12 @@ try {
   check('Payment has at least five confirmations', head - receipt.blockNumber + 1n >= 5n);
   evidence.payment = { ...evidence.payment, block: receipt.blockNumber.toString(), blockHash: receipt.blockHash, receiptStatus: receipt.status, transactionNonce: transaction.nonce, confirmations: (head - receipt.blockNumber + 1n).toString(), gasUsed: receipt.gasUsed.toString(), received: received.toString(), explorer: `https://explorer.test.mezo.org/tx/${hash}` };
   evidence.paymentDispatch = 'exact invoice payment verified on chain';
-  setStage('verify-invoice-ui');
+  await setStage('verify-invoice-ui');
   await app.locator('#pv-check').click();
   await waitFor(async () => /^Paid\./i.test((await app.locator('#pv-status').innerText()).trim()), 60_000, 1_000);
   check('Invoice UI says paid and locks Pay', await app.locator('#pv-pay').isDisabled());
   await appShot('04-paid-invoice');
-  setStage('reload-paid-invoice');
+  await setStage('reload-paid-invoice');
   await app.reload({ waitUntil: 'domcontentloaded' });
   await waitFor(async () => /^Paid\./i.test((await app.locator('#pv-status').innerText()).trim()), 60_000, 1_000);
   check('Reload preserves the paid lock', await app.locator('#pv-pay').isDisabled());
@@ -714,10 +790,12 @@ try {
   await pumpPromise;
   evidence.status = 'passed';
   evidence.completedAt = new Date().toISOString();
-  setStage('complete');
+  await setStage('complete');
 } catch (error) {
+  pumpRunning = false;
   evidence.failedAt = new Date().toISOString();
   evidence.failure = { stage, type: errorClass(error), reason: errorReason(error) };
+  await checkpoint('harness-step-failed', { reason: evidence.failure.reason });
   if (!walletReady && wallet && !wallet.isClosed()) {
     evidence.onboardingDiagnostic = {
       ...await pageMetadata(wallet),
