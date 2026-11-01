@@ -16,6 +16,10 @@ const RPC = 'https://rpc.test.mezo.org';
 const CHAIN_ID = 31611;
 const TOKEN = '0x118917a40FAF1CD7a13dB0Ef56C86De7973Ac503';
 const EXTENSION_VERSION = '13.55.0';
+// The verified v13.55.0 Chrome ZIP uses Chrome's four-part version plus a human version_name.
+const EXTENSION_CHROME_VERSION = '13.55.0.0';
+const EXTENSION_PACKAGE_SHA256 = '36ce2660b08ec7c52886438d5ca5c00ce79e883bacee87c16760371cfa88878f';
+const EXTENSION_MANIFEST_SHA256 = '85c380740218de335423e7327fa60f99d8125c8f8ac9109b03ba5a263492c44f';
 const OUT = resolve('.reports/browser');
 const DEADLINE = Date.now() + 18 * 60_000;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -265,9 +269,24 @@ try {
   const extensionPath = resolve(process.env.METAMASK_EXTENSION_PATH ?? '');
   const manifestBytes = await readFile(join(extensionPath, 'manifest.json'));
   const manifest = JSON.parse(manifestBytes.toString());
-  check('Loaded package is the pinned MetaMask release', manifest.version === EXTENSION_VERSION && manifest.manifest_version === 3);
+  // Save public identity metadata before checking it, so a setup failure remains diagnosable.
+  evidence.wallet.manifest = {
+    version: manifest.version,
+    versionName: manifest.version_name,
+    manifestVersion: manifest.manifest_version,
+    serviceWorker: manifest.background?.service_worker,
+  };
   evidence.wallet.actualVersion = manifest.version;
+  evidence.wallet.actualReleaseVersion = manifest.version_name;
   evidence.wallet.manifestSha256 = createHash('sha256').update(manifestBytes).digest('hex');
+  evidence.wallet.packageSha256 = (await readFile(join(OUT, 'metamask-package.sha256'), 'utf8')).trim().split(/\s+/)[0];
+  check('Loaded package is the pinned MetaMask release',
+    manifest.version === EXTENSION_CHROME_VERSION
+    && manifest.version_name === EXTENSION_VERSION
+    && manifest.manifest_version === 3
+    && manifest.background?.service_worker === 'service-worker.js'
+    && evidence.wallet.manifestSha256 === EXTENSION_MANIFEST_SHA256
+    && evidence.wallet.packageSha256 === EXTENSION_PACKAGE_SHA256);
   evidence.commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
   check('Workflow checks the exact source commit', !process.env.GITHUB_SHA || evidence.commit === process.env.GITHUB_SHA);
   const profile = await mkdtemp(join(process.env.RUNNER_TEMP ?? tmpdir(), 'musd-wallet-profile-'));

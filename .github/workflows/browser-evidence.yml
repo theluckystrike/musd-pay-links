@@ -41,6 +41,8 @@ jobs:
           curl --fail --location --retry 2 --max-time 120 --output metamask-chrome-13.55.0.zip https://github.com/MetaMask/metamask-extension/releases/download/v13.55.0/metamask-chrome-13.55.0.zip
           curl --fail --location --retry 2 --max-time 30 --output SHA256SUMS https://github.com/MetaMask/metamask-extension/releases/download/v13.55.0/SHA256SUMS
           awk '$2 == "metamask-chrome-13.55.0.zip" { print }' SHA256SUMS | sha256sum --check --strict
+          # Also pin the digest independently published by GitHub's official release asset API.
+          printf '%s  %s\n' '36ce2660b08ec7c52886438d5ca5c00ce79e883bacee87c16760371cfa88878f' 'metamask-chrome-13.55.0.zip' | sha256sum --check --strict
           mkdir metamask
           unzip -q metamask-chrome-13.55.0.zip -d metamask
           mkdir -p "$GITHUB_WORKSPACE/.reports/browser"
