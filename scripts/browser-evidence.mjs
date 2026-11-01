@@ -491,21 +491,61 @@ async function chooseAccount(label, { create = false } = {}) {
   if (create && !(await target.isVisible())) {
     await setStage(`${accountStage}-wait-create-ready`);
     const add = wallet.getByTestId('add-multichain-account-button').first();
+    const addWallet = wallet.getByTestId('account-list-add-wallet-button');
+    const readiness = {
+      startedAt: new Date().toISOString(), timeoutMs: 120_000, outcome: 'waiting', observations: [],
+      conditions: 'Pinned AccountListPage: Add wallet enabled/not syncing for 2s, then normalized exact Add account label for 1s; no loading icon.',
+      limit: 'Only public Add account/Add wallet readiness labels and flags are recorded. No account-creation click is retried.',
+    };
+    evidence.wallet.accountCreationReadiness = readiness;
+    let footerReadySince = 0;
     let readySince = 0;
+    let lastObservation = '';
+    let lastReadinessSave = 0;
     // AddMultichainAccount is a DIV, not a disabled button. While syncing its handler is a no-op.
-    // Follow AccountListPage.waitForAddAccountButtonStablyReady: exact ready label for 1 second.
-    const ready = await waitFor(async () => {
-      if (await target.isVisible().catch(() => false)) return 'existing';
-      const renderedReady = await add.isVisible().catch(() => false)
-        && (await add.innerText()).trim() === 'Add account'
-        && await add.locator('.add-multichain-account__icon-box__icon-loading').count() === 0;
-      if (!renderedReady) {
-        readySince = 0;
-        return false;
-      }
-      readySince ||= Date.now();
-      return Date.now() - readySince >= 1_000 ? 'create' : false;
-    }, 60_000);
+    // Match the helper's XPath normalize-space(.) and stable footer/account gates. Production
+    // account discovery uses real external services, so allow a longer bounded wait than mocks.
+    let ready;
+    try {
+      ready = await waitFor(async () => {
+        const normalizeSpace = (text) => text.replace(/\s+/g, ' ').trim();
+        const observed = { desiredAccountVisible: await target.isVisible().catch(() => false),
+          addAccountVisible: await add.isVisible().catch(() => false),
+          addWalletVisible: await addWallet.isVisible().catch(() => false) };
+        try {
+          observed.addAccountLabel = observed.addAccountVisible ? normalizeSpace(await add.innerText({ timeout: 2_000 })).slice(0, 120) : null;
+          observed.addWalletLabel = observed.addWalletVisible ? normalizeSpace(await addWallet.innerText({ timeout: 2_000 })).slice(0, 120) : null;
+          observed.addWalletDisabled = observed.addWalletVisible ? await addWallet.isDisabled() : null;
+          observed.loadingIconCount = await add.locator('.add-multichain-account__icon-box__icon-loading').count();
+          observed.loadingIconVisible = await add.locator('.add-multichain-account__icon-box__icon-loading').first().isVisible().catch(() => false);
+        } catch (error) { observed.readFailure = { errorClass: errorClass(error), reason: errorReason(error) }; }
+        readiness.latest = { ...observed, at: new Date().toISOString(), route: new URL(wallet.url()).hash.split('?')[0] };
+        const signature = JSON.stringify(observed);
+        if (signature !== lastObservation || Date.now() - lastReadinessSave >= 5_000) {
+          if (readiness.observations.length < 24) readiness.observations.push(readiness.latest);
+          lastObservation = signature;
+          lastReadinessSave = Date.now();
+          await persistEvidence();
+        }
+        if (observed.desiredAccountVisible) return 'existing';
+        const footerReady = !observed.readFailure && observed.addWalletVisible && observed.addWalletDisabled === false && observed.addWalletLabel === 'Add wallet';
+        if (!footerReady) { footerReadySince = 0; readySince = 0; return false; }
+        footerReadySince ||= Date.now();
+        if (Date.now() - footerReadySince < 2_000) return false;
+        const renderedReady = observed.addAccountVisible && observed.addAccountLabel === 'Add account' && observed.loadingIconCount === 0;
+        if (!renderedReady) { readySince = 0; return false; }
+        readySince ||= Date.now();
+        return Date.now() - readySince >= 1_000 ? 'create' : false;
+      }, readiness.timeoutMs, 500);
+      readiness.outcome = ready === 'existing' ? 'account-already-visible' : 'stably-ready-for-one-click';
+      readiness.finishedAt = new Date().toISOString();
+      await persistEvidence();
+    } catch (error) {
+      readiness.outcome = errorReason(error) === 'timeout' ? 'timed-out-without-create-click' : 'readiness-failed-without-create-click';
+      readiness.finishedAt = new Date().toISOString();
+      await persistEvidence();
+      throw error;
+    }
     if (ready === 'create') {
       await setStage(`${accountStage}-create-once`);
       evidence.wallet.accountCreationAttempts = (evidence.wallet.accountCreationAttempts ?? 0) + 1;
