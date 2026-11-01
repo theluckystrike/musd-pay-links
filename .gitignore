@@ -5,3 +5,5 @@ web/public/client.js
 *.key
 .secrets/
 .oc-*.log
+.reports/
+.vitest/
