@@ -21,6 +21,8 @@ let reviewedForm: string | null = null;
 let knownHash: `0x${string}` | null = null;
 let knownAccount: `0x${string}` | null = null;
 let knownExpected: OpenTroveTransaction | undefined;
+let existingReadBusy = false;
+let existingReadRevision = 0;
 
 function message(text: string): void { box("b-wallet-status").textContent = text; }
 function resetReview(): void {
@@ -164,9 +166,58 @@ async function checkLoan(): Promise<void> {
   } catch (error) { message(error instanceof Error ? error.message : "The loan result is unavailable. Do not retry the loan."); }
   finally { busy = false; button("b-loan-check").disabled = false; }
 }
+
+async function checkExistingLoan(): Promise<void> {
+  if (existingReadBusy) return;
+  const out = box("b-existing-out");
+  if (field("b-chain").value !== String(MEZO_TESTNET.id)) {
+    out.textContent = "Select Mezo Testnet to check an existing testnet loan.";
+    return;
+  }
+  const account = field("b-existing-account").value.trim();
+  const hash = field("b-existing-hash").value.trim();
+  const revision = existingReadRevision;
+  const sameRead = () => existingReadRevision === revision && field("b-existing-account").value.trim() === account
+    && field("b-existing-hash").value.trim() === hash && field("b-chain").value === String(MEZO_TESTNET.id);
+  const context = `Borrower: ${account}\nTransaction: ${hash}`;
+  const inputsChanged = "Inputs changed. Click Check existing loan to read the historical result.";
+  if (!/^0x[0-9a-fA-F]{40}$/.test(account) || /^0x0{40}$/i.test(account) || !/^0x[0-9a-fA-F]{64}$/.test(hash)) {
+    out.textContent = "Enter a nonzero borrower address and a full loan transaction hash on Mezo Testnet.";
+    return;
+  }
+  existingReadBusy = true;
+  for (const id of ["b-existing-go", "b-existing-example", "b-existing-account", "b-existing-hash"]) field(id).disabled = true;
+  try {
+    out.textContent = `Reading the existing Mezo Testnet transaction, mint and historical trove state.\n${context}`;
+    const proof = await verifyOpenTrove(MEZO_TESTNET, { account, hash });
+    if (!sameRead()) { out.textContent = inputsChanged; return; }
+    if (proof.status === "confirmed" && proof.position && proof.mintedMUSD != null) {
+      out.textContent = [
+        `Historical Mezo Testnet loan, confirmed with ${proof.confirmations} confirmations.`,
+        `Borrower: ${account}`,
+        `Transaction: ${hash}`,
+        `Values at the END of receipt block ${proof.block}:`,
+        `Exact MUSD minted to the borrower: ${formatAmount(proof.mintedMUSD)} MUSD`,
+        `Full trove debt at block end: ${formatAmount(proof.position.debt)} MUSD`,
+        `Trove collateral at block end: ${formatAmount(proof.position.collateral)} test BTC`,
+        `Wallet MUSD balance at block end: ${formatAmount(proof.position.musdBalance)} MUSD`,
+        "Historical values, not current loan or wallet state. This read-only check opens no loan.",
+      ].join("\n");
+    } else out.textContent = `${context}\n${proof.message}`;
+  } catch (error) {
+    out.textContent = sameRead()
+      ? `${context}\n${error instanceof Error ? error.message : "The existing testnet loan could not be checked."}`
+      : inputsChanged;
+  } finally {
+    existingReadBusy = false;
+    for (const id of ["b-existing-go", "b-existing-example", "b-existing-account", "b-existing-hash"]) field(id).disabled = false;
+  }
+}
+
 export function initBorrowWallet(): void {
   if (!document.getElementById("b-direct")) return;
   const updateNetwork = () => {
+    existingReadRevision++;
     box("b-direct").hidden = field("b-chain").value !== String(MEZO_TESTNET.id);
     resetReview();
     box("b-out").replaceChildren();
@@ -179,5 +230,16 @@ export function initBorrowWallet(): void {
   button("b-review").onclick = () => void reviewLoan();
   button("b-open").onclick = () => void openLoan();
   button("b-loan-check").onclick = () => void checkLoan();
+  button("b-existing-go").onclick = () => void checkExistingLoan();
+  button("b-existing-example").onclick = () => {
+    if (existingReadBusy) return;
+    field("b-existing-account").value = "0x980E2213E6396043e2d104Ad65cBF162985Ce313";
+    field("b-existing-hash").value = "0x1de64d3a9fe0588d2707718ed3c247d793f5d5f818efd502ae80ee8dc70a26f2";
+    box("b-existing-out").textContent = "Project example from 26 Oct 2026 loaded. Click Check existing loan to read its historical result.";
+  };
+  for (const id of ["b-existing-account", "b-existing-hash"]) field(id).addEventListener("input", () => {
+    existingReadRevision++;
+    box("b-existing-out").textContent = "Inputs changed. Click Check existing loan to read the historical result.";
+  });
   updateNetwork();
 }

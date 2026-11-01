@@ -115,6 +115,7 @@ footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
     </dl>
     <div class="qr" id="pv-qr" role="img" aria-label="QR code of this invoice"></div>
     <div class="muted" id="pv-limit" role="note">Your limit is the invoice amount.</div>
+    <p class="muted" id="pv-wallet-note" role="note" hidden>No browser wallet found. Open this page in a browser with your wallet, or scan the QR code.</p>
     <div class="actions">
       <button id="pv-pay" type="button" aria-describedby="pv-status" disabled>Pay with browser wallet</button>
       <button class="ghost" id="pv-check" type="button">Check again</button>
@@ -212,6 +213,16 @@ footer { margin-top: 28px; color: var(--muted); font-size: 13px; }
         <div class="actions"><button id="b-review">Connect wallet and review loan</button><button id="b-open" disabled>Open testnet loan</button><button id="b-loan-check" hidden>Check loan result</button></div>
         <p id="b-wallet-status" aria-live="polite">Reviewing a loan sends no transaction.</p>
         <div id="b-loan-review" aria-live="polite"></div>
+        <details class="out" id="b-existing">
+          <summary>Check an existing testnet loan</summary>
+          <p>Read a public loan transaction without connecting a wallet. Values describe the end of its receipt block, not the current position. This check opens no loan.</p>
+          <label for="b-existing-account">Borrower address on Mezo Testnet</label>
+          <input id="b-existing-account" spellcheck="false" autocomplete="off" placeholder="0x…">
+          <label for="b-existing-hash">Loan transaction hash</label>
+          <input id="b-existing-hash" spellcheck="false" autocomplete="off" placeholder="0x…">
+          <div class="actions"><button id="b-existing-go" type="button">Check existing loan (read-only)</button><button id="b-existing-example" class="ghost" type="button">Load project example (26 Oct)</button></div>
+          <div id="b-existing-out" class="out mono" role="status" aria-live="polite">Enter a borrower address and transaction hash, then check the historical result.</div>
+        </details>
       </div>
     </section>
   </div>

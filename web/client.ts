@@ -75,6 +75,8 @@ function setPayButton(): void {
   const eth = (window as unknown as { ethereum?: unknown }).ethereum;
   const disabled = !(lastCheck?.ok && eth) || payLock !== null || paying;
   const title = payLock ?? (eth ? "" : "No browser wallet found");
+  const walletNote = document.getElementById("pv-wallet-note");
+  if (walletNote) walletNote.hidden = Boolean(eth);
   for (const id of ["p-pay", "pv-pay"]) {
     const b = document.getElementById(id) as HTMLButtonElement | null;
     if (!b) continue;
