@@ -852,7 +852,8 @@ async function selectTaskAccountPermissions(page, snapshot) {
       const taskRows = [];
       for (const label of labels) {
         const name = modal.getByTestId(`multichain-account-cell-name-${label}`);
-        const row = modal.locator('.multichain-account-cell').filter({ has: name });
+        // `has` is relative to each row: its inner locator must not include the modal ancestor.
+        const row = modal.locator('.multichain-account-cell').filter({ has: page.getByTestId(`multichain-account-cell-name-${label}`) });
         taskRows.push({ label, count: await name.count(), visible: await name.isVisible().catch(() => false),
           rowCount: await row.count(), checkboxCount: await row.getByRole('checkbox').count(),
           checkboxVisible: await row.getByRole('checkbox').isVisible().catch(() => false) });
@@ -874,7 +875,7 @@ async function selectTaskAccountPermissions(page, snapshot) {
     requireConsentRoute(page, snapshot.route);
     check('Connect permission UI lists only the two task accounts', readiness.ready && await names.count() === 2);
     for (const label of ['Account 2', 'Account 1']) {
-      const row = modal.locator('.multichain-account-cell').filter({ has: modal.getByTestId(`multichain-account-cell-name-${label}`) });
+      const row = modal.locator('.multichain-account-cell').filter({ has: page.getByTestId(`multichain-account-cell-name-${label}`) });
       const checkbox = row.getByRole('checkbox');
       if (!(await checkbox.isChecked())) {
         if (snapshot) requireConsentRoute(page, snapshot.route);
@@ -1024,6 +1025,9 @@ async function confirmationPump() {
         evidence.confirmationFailure ??= failure;
         pumpError ??= new Error('Wallet confirmation did not complete safely');
         pumpRunning = false;
+        if (['connect', 'signature', 'network', 'transaction'].includes(reviewKind)) {
+          await publicWalletShot(page, `wallet-${reviewKind}-review-failed`).catch(() => {});
+        }
         await checkpoint('wallet-pump-failed', { reviewKind, reason });
         return;
       }
