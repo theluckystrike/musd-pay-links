@@ -26,6 +26,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 let stage = 'preflight';
 let context;
 let wallet;
+let walletWorker;
 let app;
 let walletReady = false;
 let secretEntryStarted = false;
@@ -70,6 +71,17 @@ function errorClass(error) {
   // Error names can be application-controlled; publish only standard class names.
   return ['Error', 'TypeError', 'ReferenceError', 'RangeError', 'SyntaxError', 'URIError', 'EvalError', 'TimeoutError'].includes(error?.name) ? error.name : 'Error';
 }
+function errorReason(error) {
+  // Match locally, then discard. Never return the error message or captured substrings.
+  const message = typeof error?.message === 'string' ? error.message : '';
+  if (/execution context was destroyed|cannot find context|cannot find execution context/i.test(message)) return 'execution-context-destroyed';
+  if (/target.*closed|session.*closed|page.*closed|browser.*closed/i.test(message)) return 'target-closed';
+  if (/frame.*detached|detached.*frame/i.test(message)) return 'frame-detached';
+  if (/content.security.policy|unsafe-eval|trustedscript|refused to evaluate|evaluation.*denied/i.test(message)) return 'evaluation-denied';
+  if (/lavamoat|scuttl|globalthis.*inaccessible/i.test(message)) return 'global-intrinsics-restricted';
+  if (/timeout|timed out/i.test(message) || error?.name === 'TimeoutError') return 'timeout';
+  return 'unclassified';
+}
 async function persistEvidence() {
   evidence.wallet.confirmations = { signatureApprovals, transactionRejections, transactionApprovals, walletPromptActions, countsAreActionAttempts: true };
   if (transactionApprovals > 0 && !evidence.payment?.hash) evidence.paymentDispatch = 'unknown: approval attempted; hash not observed; no automatic resend';
@@ -98,8 +110,79 @@ async function pageMetadata(page) {
       id: node.getAttribute('data-testid'), tag: node.tagName, type: node.getAttribute('type'),
       visible: typeof node.getClientRects === 'function' && node.getClientRects().length > 0,
     })));
-  } catch (error) { metadata.collectionErrorClass = errorClass(error); }
+    metadata.method = 'Playwright DOM metadata projection';
+    metadata.nodeCount = metadata.elements.length;
+  } catch (error) {
+    metadata.collectionErrorClass = errorClass(error);
+    metadata.collectionErrorReason = errorReason(error);
+    let session;
+    try {
+      session = await context.newCDPSession(page);
+      // CDP's raw document stays in memory. Never persist attributes, values, text or snapshots.
+      const document = await Promise.race([
+        session.send('DOM.getDocument', { depth: -1, pierce: false }),
+        sleep(5_000).then(() => { throw new Error('Metadata collection timeout'); }),
+      ]);
+      const pending = [document.root];
+      const elements = [];
+      while (pending.length) {
+        const node = pending.pop();
+        if (node.nodeType === 1) {
+          let id = null;
+          let type = null;
+          for (let i = 0; i < (node.attributes?.length ?? 0); i += 2) {
+            if (node.attributes[i] === 'data-testid') id = node.attributes[i + 1];
+            if (node.attributes[i] === 'type') type = node.attributes[i + 1];
+          }
+          elements.push({ id, tag: node.nodeName, type });
+        }
+        if (node.children) pending.push(...node.children);
+      }
+      metadata.method = 'CDP DOM.getDocument metadata projection; visibility not collected';
+      metadata.elements = elements;
+      metadata.nodeCount = elements.length;
+    } catch (fallbackError) {
+      metadata.fallbackErrorClass = errorClass(fallbackError);
+      metadata.fallbackErrorReason = errorReason(fallbackError);
+    } finally { if (session) await session.detach().catch(() => {}); }
+  }
   return metadata;
+}
+async function completedOnboardingSignal() {
+  const readBoolean = async () => {
+    const split = await chrome.storage.local.get('OnboardingController');
+    if (typeof split.OnboardingController?.completedOnboarding === 'boolean') return split.OnboardingController.completedOnboarding;
+    const legacy = await chrome.storage.local.get('data');
+    return legacy.data?.OnboardingController?.completedOnboarding === true;
+  };
+  try {
+    // Production ExtensionStore supports split and legacy storage. Only this boolean leaves the
+    // extension worker: no whole state object, vault, phrase, password or storage dump is returned.
+    const completed = await walletWorker.evaluate(readBoolean);
+    evidence.wallet.completionSignalMethod = 'Extension service-worker boolean projection';
+    return completed;
+  } catch (error) {
+    evidence.wallet.completionSignalFailure = { errorClass: errorClass(error), reason: errorReason(error) };
+    let session;
+    try {
+      // Direct CDP avoids Playwright's injected evaluation helpers when extension globals restrict
+      // them. The static expression is read-only and its sole return value is a boolean.
+      session = await context.newCDPSession(wallet);
+      const result = await Promise.race([
+        session.send('Runtime.evaluate', { expression: `(${readBoolean.toString()})()`, awaitPromise: true, returnByValue: true }),
+        sleep(5_000).then(() => { throw new Error('Completion boolean timeout'); }),
+      ]);
+      if (result.exceptionDetails || typeof result.result?.value !== 'boolean') {
+        evidence.wallet.completionSignalFallbackFailure = 'boolean-evaluation-unavailable';
+        return false;
+      }
+      evidence.wallet.completionSignalMethod = 'Extension-page CDP boolean projection';
+      return result.result.value;
+    } catch (fallbackError) {
+      evidence.wallet.completionSignalFallbackFailure = { errorClass: errorClass(fallbackError), reason: errorReason(fallbackError) };
+      return false;
+    } finally { if (session) await session.detach().catch(() => {}); }
+  }
 }
 function observePageErrors(page) {
   page.on('pageerror', (error) => {
@@ -219,6 +302,8 @@ async function importWallet(mnemonic, password) {
   await wallet.getByTestId('create-password-submit').click();
   setStage('wallet-onboarding-finish');
   let doneClicked = false;
+  let doneReadySince = 0;
+  let homeNavigationAttempted = false;
   let unlockAttempted = false;
   await waitFor(async () => {
     // OnboardingFlow explicitly requests a password when the in-memory SRP was lost.
@@ -247,9 +332,25 @@ async function importWallet(mnemonic, password) {
     }
     if (await clickIfVisible(wallet, 'download-app-continue')) return false;
     if (!doneClicked && await visible(wallet, 'onboarding-complete-done')) {
+      const done = wallet.getByTestId('onboarding-complete-done');
+      if (await done.isDisabled()) {
+        doneReadySince = 0;
+        return false;
+      }
+      doneReadySince ||= Date.now();
+      if (Date.now() - doneReadySince < 2_000) return false;
       doneClicked = true;
-      await wallet.getByTestId('onboarding-complete-done').click();
-      // CreationSuccessful.onDone awaits completeOnboarding. A forced goto here races persistence.
+      evidence.wallet.onboardingDoneAttempts = 1;
+      await done.click();
+      return false;
+    }
+    if (doneClicked && !homeNavigationAttempted && new URL(wallet.url()).hash.split('?')[0] === '#/onboarding/completion') {
+      // Official handleSidepanelPostOnboarding waits for completedOnboarding=true, then opens home.
+      // Done opens the side panel and intentionally leaves this tab on the completion route.
+      await waitFor(completedOnboardingSignal, 30_000, 1_000);
+      evidence.wallet.onboardingCompletionSignal = { kind: 'read-only persisted OnboardingController.completedOnboarding', value: true, observedAfterNormalDoneUI: true, at: new Date().toISOString() };
+      homeNavigationAttempted = true;
+      await wallet.goto(`chrome-extension://${extensionId}/home.html`);
       return false;
     }
     return await visible(wallet, 'account-menu-icon');
@@ -532,6 +633,7 @@ try {
   for (const page of context.pages()) observePageErrors(page);
   let [worker] = context.serviceWorkers();
   if (!worker) worker = await context.waitForEvent('serviceworker', { timeout: 30_000 });
+  walletWorker = worker;
   extensionId = new URL(worker.url()).host;
   evidence.wallet.extensionId = extensionId;
   wallet = await waitFor(async () => context.pages().find((page) => isExtensionPage(page)
@@ -641,7 +743,7 @@ try {
   setStage('complete');
 } catch (error) {
   evidence.failedAt = new Date().toISOString();
-  evidence.failure = { stage, type: errorClass(error) };
+  evidence.failure = { stage, type: errorClass(error), reason: errorReason(error) };
   if (!walletReady && wallet && !wallet.isClosed()) {
     evidence.onboardingDiagnostic = {
       ...await pageMetadata(wallet),
