@@ -161,20 +161,47 @@ async function importWallet(mnemonic, password) {
   check('Task-only wallet imported through MetaMask UI', true);
 }
 async function chooseAccount(label, { create = false } = {}) {
-  setStage(`select-${label.replaceAll(' ', '-').toLowerCase()}`);
+  const accountStage = `select-${label.replaceAll(' ', '-').toLowerCase()}`;
+  setStage(`${accountStage}-open-list`);
   await wallet.bringToFront();
   if (!(await visible(wallet, 'account-menu-icon'))) await wallet.goto(`chrome-extension://${extensionId}/home.html`);
   await wallet.getByTestId('account-menu-icon').click();
-  if (create && !(await visible(wallet, `multichain-account-cell-name-${label}`))) {
+  // HeaderNavbar.openAccountMenu in the pinned release waits for this page before using its rows.
+  await wallet.getByTestId('parent-selector-account-list-page').waitFor({ state: 'visible' });
+  const target = wallet.getByTestId(`multichain-account-cell-name-${label}`);
+  if (create && !(await target.isVisible())) {
+    setStage(`${accountStage}-wait-create-ready`);
     const add = wallet.getByTestId('add-multichain-account-button').first();
-    await add.waitFor({ state: 'visible' });
-    await waitFor(async () => !(await add.isDisabled()), 45_000);
-    await add.click();
+    let readySince = 0;
+    // AddMultichainAccount is a DIV, not a disabled button. While syncing its handler is a no-op.
+    // Follow AccountListPage.waitForAddAccountButtonStablyReady: exact ready label for 1 second.
+    const ready = await waitFor(async () => {
+      if (await target.isVisible().catch(() => false)) return 'existing';
+      const renderedReady = await add.isVisible().catch(() => false)
+        && (await add.innerText()).trim() === 'Add account'
+        && await add.locator('.add-multichain-account__icon-box__icon-loading').count() === 0;
+      if (!renderedReady) {
+        readySince = 0;
+        return false;
+      }
+      readySince ||= Date.now();
+      return Date.now() - readySince >= 1_000 ? 'create' : false;
+    }, 60_000);
+    if (ready === 'create') {
+      setStage(`${accountStage}-create-once`);
+      evidence.wallet.accountCreationAttempts = (evidence.wallet.accountCreationAttempts ?? 0) + 1;
+      check('Only one account-creation UI click is attempted', evidence.wallet.accountCreationAttempts === 1);
+      await add.click();
+    }
   }
-  await wallet.getByTestId(`multichain-account-cell-name-${label}`).click();
-  await wallet.getByTestId('account-menu-icon').waitFor({ state: 'visible' });
-  const selected = await wallet.getByTestId('account-menu-icon').innerText();
-  check(`MetaMask selected ${label}`, selected.includes(label));
+  setStage(`${accountStage}-wait-row`);
+  await target.waitFor({ state: 'visible', timeout: 60_000 });
+  setStage(`${accountStage}-select-row`);
+  await target.click();
+  setStage(`${accountStage}-verify-selection`);
+  await waitFor(async () => await visible(wallet, 'account-menu-icon')
+    && (await wallet.getByTestId('account-menu-icon').innerText()).includes(label), 45_000);
+  check(`MetaMask selected ${label}`, true);
 }
 function classifyConfirmation(text, url) {
   if (/Secret Recovery Phrase|Enter your password|unlock your wallet/i.test(text)) return 'forbidden';
@@ -510,6 +537,15 @@ try {
       const file = 'onboarding-before-secret-failure.png';
       await wallet.screenshot({ path: join(OUT, file), fullPage: false }).then(() => evidence.images.push(file)).catch(() => {});
     }
+  }
+  if (walletReady && stage.startsWith('select-account-') && wallet && !wallet.isClosed()) {
+    evidence.accountDiagnostic = {
+      route: new URL(wallet.url()).hash,
+      // Account-stage diagnostics have no labels, text, values, raw HTML or home screenshots.
+      elements: await wallet.locator('*').evaluateAll((nodes) => nodes.map((node) => ({
+        id: node.getAttribute('data-testid'), tag: node.tagName, type: node.getAttribute('type'), visible: node.getClientRects().length > 0,
+      }))).catch(() => []),
+    };
   }
   // Do not emit Playwright error/stack or locator call logs: onboarding calls contain secret input.
   console.error(`Browser evidence incomplete at public stage ${stage}. No raw wallet error is emitted.`);
