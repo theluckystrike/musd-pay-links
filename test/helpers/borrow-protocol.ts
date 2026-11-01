@@ -122,4 +122,3 @@ export function protocol(options: Options = {}, seen: Seen[] = []): Fetch {
     return answer(responses[fn]);
   };
 }
-
