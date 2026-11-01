@@ -26,7 +26,6 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 let stage = 'preflight';
 let context;
 let wallet;
-let walletWorker;
 let app;
 let walletReady = false;
 let secretEntryStarted = false;
@@ -147,42 +146,6 @@ async function pageMetadata(page) {
     } finally { if (session) await session.detach().catch(() => {}); }
   }
   return metadata;
-}
-async function completedOnboardingSignal() {
-  const readBoolean = async () => {
-    const split = await chrome.storage.local.get('OnboardingController');
-    if (typeof split.OnboardingController?.completedOnboarding === 'boolean') return split.OnboardingController.completedOnboarding;
-    const legacy = await chrome.storage.local.get('data');
-    return legacy.data?.OnboardingController?.completedOnboarding === true;
-  };
-  try {
-    // Production ExtensionStore supports split and legacy storage. Only this boolean leaves the
-    // extension worker: no whole state object, vault, phrase, password or storage dump is returned.
-    const completed = await walletWorker.evaluate(readBoolean);
-    evidence.wallet.completionSignalMethod = 'Extension service-worker boolean projection';
-    return completed;
-  } catch (error) {
-    evidence.wallet.completionSignalFailure = { errorClass: errorClass(error), reason: errorReason(error) };
-    let session;
-    try {
-      // Direct CDP avoids Playwright's injected evaluation helpers when extension globals restrict
-      // them. The static expression is read-only and its sole return value is a boolean.
-      session = await context.newCDPSession(wallet);
-      const result = await Promise.race([
-        session.send('Runtime.evaluate', { expression: `(${readBoolean.toString()})()`, awaitPromise: true, returnByValue: true }),
-        sleep(5_000).then(() => { throw new Error('Completion boolean timeout'); }),
-      ]);
-      if (result.exceptionDetails || typeof result.result?.value !== 'boolean') {
-        evidence.wallet.completionSignalFallbackFailure = 'boolean-evaluation-unavailable';
-        return false;
-      }
-      evidence.wallet.completionSignalMethod = 'Extension-page CDP boolean projection';
-      return result.result.value;
-    } catch (fallbackError) {
-      evidence.wallet.completionSignalFallbackFailure = { errorClass: errorClass(fallbackError), reason: errorReason(fallbackError) };
-      return false;
-    } finally { if (session) await session.detach().catch(() => {}); }
-  }
 }
 function observePageErrors(page) {
   page.on('pageerror', (error) => {
@@ -345,16 +308,28 @@ async function importWallet(mnemonic, password) {
       return false;
     }
     if (doneClicked && !homeNavigationAttempted && new URL(wallet.url()).hash.split('?')[0] === '#/onboarding/completion') {
-      // Official handleSidepanelPostOnboarding waits for completedOnboarding=true, then opens home.
-      // Done opens the side panel and intentionally leaves this tab on the completion route.
-      await waitFor(completedOnboardingSignal, 30_000, 1_000);
-      evidence.wallet.onboardingCompletionSignal = { kind: 'read-only persisted OnboardingController.completedOnboarding', value: true, observedAfterNormalDoneUI: true, at: new Date().toISOString() };
+      // Production Done opens the side panel and leaves this tab on completion. Follow its normal
+      // home entry once after settling. RequireAuthenticated redirects incomplete onboarding away
+      // from Home; only its real home UI below can prove completion. No storage/state is evaluated.
       homeNavigationAttempted = true;
+      evidence.wallet.postDoneHomeNavigationAttempts = 1;
+      evidence.wallet.postDoneSettlingMs = 1_500;
+      await sleep(1_500);
       await wallet.goto(`chrome-extension://${extensionId}/home.html`);
       return false;
     }
-    return await visible(wallet, 'account-menu-icon');
+    const route = new URL(wallet.url()).hash.split('?')[0];
+    return doneClicked && ['', '#', '#/'].includes(route) && await visible(wallet, 'account-menu-icon');
   }, 90_000);
+  evidence.wallet.onboardingCompletionSignal = {
+    kind: 'Actual account-menu UI on the normal home route behind RequireAuthenticated',
+    route: new URL(wallet.url()).hash.split('?')[0],
+    observedAfterNormalDoneUI: doneClicked,
+    persistedBooleanObserved: false,
+    at: new Date().toISOString(),
+  };
+  check('Normal home route and account UI prove onboarding completed', doneClicked
+    && ['', '#', '#/'].includes(new URL(wallet.url()).hash.split('?')[0]) && await visible(wallet, 'account-menu-icon'));
   walletReady = true;
   check('Task-only wallet imported through MetaMask UI', true);
 }
@@ -633,7 +608,6 @@ try {
   for (const page of context.pages()) observePageErrors(page);
   let [worker] = context.serviceWorkers();
   if (!worker) worker = await context.waitForEvent('serviceworker', { timeout: 30_000 });
-  walletWorker = worker;
   extensionId = new URL(worker.url()).host;
   evidence.wallet.extensionId = extensionId;
   wallet = await waitFor(async () => context.pages().find((page) => isExtensionPage(page)
