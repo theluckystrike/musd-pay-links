@@ -4,9 +4,13 @@ Use the source commit and native runner reports to assess a result. A count copi
 
 ## Current sprint status
 
-<!-- SPRINT_FINAL_STATUS: root must replace this block with final commit-linked results before publishing the sprint evidence. -->
-The 1 November sprint is in progress. Final offline and live counts, the browser-wallet outcome, the deployment revision and any newly opened loan remain pending here. Read the retained workflow reports before making a readiness claim. The dated baseline below is not a substitute for those results.
-<!-- /SPRINT_FINAL_STATUS -->
+The retained 1 November results identify separate source revisions:
+
+- Clean code revision `e50735e5ea034a96a912545756005bc4af87205b` passed 474 offline tests with seven skipped, then all 481 with LIVE enabled. Typecheck, browser build and actual Worker runtime smoke passed in [run 41302244470](https://github.com/theluckystrike/musd-pay-links/actions/runs/41302244470). Earlier live availability failures, timeouts and HTTP 429 results remain part of the history; a later pass does not erase them.
+- Actual MetaMask run [41302937067](https://github.com/theluckystrike/musd-pay-links/actions/runs/41302937067) at harness revision `5987b40b82eb0451e9d573c0295e933cdd9d01e7` passed all 84 harness assertions. It signed invoice `INV-6MG8SUDA`, rejected one payment without a nonce change, then approved one exact 1 MUSD transfer. The receipt at block 16,505,037 had five confirmations when checked. The product showed Paid, retained the lock after reload and stored that exact hash. The [public evidence packet](sprint-2026-11-01/README.md) includes the receipt and captures.
+- The [isolated HTTPS Preview](https://sprint-20261101-musd-pay-links.lipmichal.workers.dev) serves application source `e50735e`, deployment `450ab5cb-6f94-4b2d-8aa1-7204b716ffa2`. Source HTML/client hashes and API reads passed after deployment. Invoice KV and Durable Object state are separate from production. No production traffic rollout was made. The successful wallet test used the local Worker, so it is not a claim of a wallet payment through this public Preview.
+
+The transaction used project-owned test wallets on chain 31611. It establishes no outside user, customer, grant award or revenue. The existing-loan browser view verifies an older script loan at its receipt block. A newly opened loan through the current interface remains unproved because the new test wallet lacks enough native collateral. Other wallet products and mobile wallets remain untested.
 
 ## Run the checks
 
@@ -34,6 +38,8 @@ The Verification workflow uploads `.reports/` for its exact source revision. Its
 The payment connection requests ordinary `wallet_requestPermissions` account consent after network selection. This can add one Connect prompt per payment connection. MetaMask can expose an account globally without granting it signing access on a newly added chain. The app validates the permission reply and rechecks the original payer and selected chain. Only explicit unsupported-method errors 4200 or -32601 use the legacy path with the same readback. These checks do not prove scoped authorization in every provider. A send-time 4100 error remains unknown; it does not unlock or repeat a send.
 
 The separate Browser wallet evidence workflow runs actual MetaMask in Chromium on a hosted Linux runner. It pins the official extension package digest and records its packaged identity. It uses a dedicated project test wallet and the local Worker. Never configure a production wallet for this harness.
+
+This workflow is manual-only and serializes wallet runs across refs. The temporary CI seed used for the dated sprint test is removed during closeout. A future deliberate run needs a new task-only wallet secret and matching address variables. Inspect the previous journal and reconcile any uncertain send before starting another run.
 
 A successful wallet run requires the public `browser-evidence.json`, not just a green download or build step. It must identify the source commit, actual wallet and chain, signed invoice, rejected payment request, approved payment hash, exact reference-bearing MUSD transfer, required confirmations and paid invoice state after reload. The payer and merchant remain project test addresses. This proves neither outside use nor revenue.
 

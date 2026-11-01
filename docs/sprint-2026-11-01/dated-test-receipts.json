@@ -1,0 +1,76 @@
+{
+  "scope": "Dated e50735e code verification; later source revisions need their own native reports.",
+  "reports": [
+    {
+      "recordedAt": "2026-11-01T11:31:41.643Z",
+      "commit": "e50735e5ea034a96a912545756005bc4af87205b",
+      "mode": "offline",
+      "liveEnvironment": false,
+      "command": "pnpm exec vitest run --reporter=default --reporter=json --outputFile=.reports/offline.json",
+      "sourceWorktreeClean": true,
+      "runnerReport": ".reports/offline.json",
+      "reportSha256": "db4eba16265139133cae0d6df5b30ddd5abaf5dc9a949566b23970c8b7c9efe3",
+      "success": true,
+      "counts": {
+        "collected": 481,
+        "passed": 474,
+        "failed": 0,
+        "skippedOrPending": 7,
+        "todo": 0
+      },
+      "assertionCounts": {
+        "passed": 474,
+        "skipped": 7
+      },
+      "runtime": {
+        "node": "v22.23.4",
+        "pnpm": "10.30.3",
+        "packageManager": "pnpm@10.30.3"
+      },
+      "workflow": {
+        "runId": "41302244470",
+        "attempt": "1",
+        "url": "https://github.com/theluckystrike/musd-pay-links/actions/runs/41302244470"
+      },
+      "limits": [
+        "Tests using fake providers are not browser-wallet proof.",
+        "Read-only live RPC tests do not prove a new payment or outside adoption."
+      ]
+    },
+    {
+      "recordedAt": "2026-11-01T11:31:59.954Z",
+      "commit": "e50735e5ea034a96a912545756005bc4af87205b",
+      "mode": "live",
+      "liveEnvironment": true,
+      "command": "pnpm exec vitest run --reporter=default --reporter=json --outputFile=.reports/live.json",
+      "sourceWorktreeClean": true,
+      "runnerReport": ".reports/live.json",
+      "reportSha256": "ace2f8058ed19e1d300e8de884f09f5c1e70f3f533f695698ef896e295ecb7af",
+      "success": true,
+      "counts": {
+        "collected": 481,
+        "passed": 481,
+        "failed": 0,
+        "skippedOrPending": 0,
+        "todo": 0
+      },
+      "assertionCounts": {
+        "passed": 481
+      },
+      "runtime": {
+        "node": "v22.23.4",
+        "pnpm": "10.30.3",
+        "packageManager": "pnpm@10.30.3"
+      },
+      "workflow": {
+        "runId": "41302244470",
+        "attempt": "1",
+        "url": "https://github.com/theluckystrike/musd-pay-links/actions/runs/41302244470"
+      },
+      "limits": [
+        "Tests using fake providers are not browser-wallet proof.",
+        "Read-only live RPC tests do not prove a new payment or outside adoption."
+      ]
+    }
+  ]
+}

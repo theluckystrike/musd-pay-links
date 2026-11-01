@@ -6,6 +6,9 @@ Payment links, QR codes and invoices for MUSD on Mezo. A payer-side guard checks
 - Pitch deck in [docs/pitch-deck.pdf](docs/pitch-deck.pdf)
 - Historical chain evidence in [docs/evidence.json](docs/evidence.json)
 - Current verification commands and evidence limits in [docs/verification.md](docs/verification.md)
+- Isolated 1 November branch Preview: https://sprint-20261101-musd-pay-links.lipmichal.workers.dev
+
+On 1 November, real MetaMask signed an invoice, rejected one payment without changing the payer nonce, then sent one confirmed 1 MUSD testnet payment. The page showed Paid and retained its lock after reload. This was a hosted desktop test against a local Worker with two project wallets. Read the [receipt, screenshots and limits](docs/sprint-2026-11-01/README.md). A dated clean revision passed 481 tests with live RPC checks enabled. No new in-product loan, outside merchant use or revenue is established.
 
 <img src="docs/demo-desktop.png" alt="MUSD Pay Links demo page" width="100%">
 

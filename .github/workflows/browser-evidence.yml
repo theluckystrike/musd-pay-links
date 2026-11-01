@@ -1,18 +1,14 @@
 name: Browser wallet evidence
 
 on:
-  push:
-    branches: ['sprint/**']
-    paths:
-      - scripts/browser-evidence.mjs
-      - .github/workflows/browser-evidence.yml
+  # Real wallet tests are deliberate, never a side effect of a source push.
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: browser-wallet-${{ github.ref }}
+  group: browser-wallet-evidence
   # An active wallet send must finish and record its result before another run starts.
   cancel-in-progress: false
 

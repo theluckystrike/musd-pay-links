@@ -36,7 +36,7 @@ After network selection, the payer may see another normal account-permission pro
 
 ## Business model
 
-Today the project is free and open source (MIT). It has no customers and no revenue. The plan has two parts. The guard library and the plain links stay free, so wallets and agents can use them. A hosted invoice service for shops gets a flat monthly plan with payment notifications, higher limits and a custom pay page. Payments always go straight from the payer to the merchant. The service never holds funds. The Wave 2 goal is 10 pilot merchants from the Mezo community and the author's network. None is signed today. A shop picks this over a wallet address in a chat for three reasons. The payer's guard stops a changed link. The payment is found by its reference with no hash from the payer. A payer with BTC and no MUSD sees how to mint it on the same page.
+Today the project is free and open source (MIT). It has no customers and no revenue. The plan has two parts. The guard library and the plain links stay free, so wallets and agents can use them. A hosted invoice service for shops would offer payment notifications, higher limits and a custom pay page for a flat monthly price. Pricing is unvalidated. Payments go straight from the payer to the merchant. The service never holds funds. The next validation target is one voluntary merchant or freelancer test. No participant or paid plan is agreed today. A shop may prefer this to an address in a chat because the guard checks the link and the merchant finds payment by its reference. A payer with BTC and no MUSD can separately inspect the full cost of borrowing.
 
 ## Target group
 
@@ -60,7 +60,9 @@ Entirely new, built during the hackathon. It reuses design ideas from PayLink Gu
 
 ## Project readiness
 
-The historical deployment has project-owned testnet payment evidence. Its web app and JSON API read the MUSD token and protocol on Mezo Testnet and Mainnet. Current sprint source changes need separate deployment and execution records before they can be claimed for the live demo.
+The historical deployment has project-owned testnet payment evidence. Its web app and JSON API read the MUSD token and protocol on Mezo Testnet and Mainnet. The isolated [1 November Preview](https://sprint-20261101-musd-pay-links.lipmichal.workers.dev) serves application source `e50735e`, with separate invoice storage. It is not a production traffic rollout.
+
+On 1 November, [hosted real MetaMask run 41302937067](https://github.com/theluckystrike/musd-pay-links/actions/runs/41302937067) at `5987b40` signed invoice `INV-6MG8SUDA`, rejected one transaction without a nonce change, then made one [1 MUSD payment](https://explorer.test.mezo.org/tx/0x11028978ae896a11ad946047bebd829882f729580d1d452cabf4c50b97df1fad). Exact transfer calldata, invoice reference, canonical block and at least five confirmations passed. The product showed Paid and retained its lock after reload. This wallet test used a local Worker and two project wallets, so it does not prove payment through the public HTTPS Preview or outside adoption. See the [dated evidence and limits](docs/sprint-2026-11-01/README.md). A newly opened in-product loan remains unproved because the new test wallet lacks enough native collateral.
 
 On 26 October 2026 the project made its own payment on Mezo Testnet, end to end. Testnet only, no real money.
 
@@ -72,13 +74,15 @@ On 26 October 2026 the project made its own payment on Mezo Testnet, end to end.
 
 6. Duplicate payment. On 26 Oct a second 5 MUSD payment with the same reference went to the paid invoice INV-65ZVUMXW (https://explorer.test.mezo.org/tx/0x95ef25c8d2f3dec854e8203e3122ec6694f12153d2d21b7f5945669a7c902dc4). The invoice API lists it under duplicates with refund due. The invoice still counts the first payment only.
 
-These 26 October payments were sent from scripts. They do not establish browser-wallet use or an outside merchant pilot. The sprint browser-wallet result and any new in-product loan must be assessed separately in `docs/verification.md`.
+These 26 October payments were sent from scripts. They do not establish browser-wallet use or an outside merchant pilot. The separate 1 November browser result is recorded above and in `docs/verification.md`. No newly opened in-product loan or outside merchant pilot is claimed.
 
 ## Links
 
 | What | Where |
 |---|---|
 | Live demo | https://musd-pay-links.lipmichal.workers.dev |
+| Isolated 1 November Preview | https://sprint-20261101-musd-pay-links.lipmichal.workers.dev |
+| 1 November browser evidence | https://github.com/theluckystrike/musd-pay-links/blob/sprint/20261101-wallet-evidence/docs/sprint-2026-11-01/README.md |
 | Repository | https://github.com/theluckystrike/musd-pay-links |
 | Pitch deck | https://github.com/theluckystrike/musd-pay-links/blob/main/docs/pitch-deck.pdf |
 | Pitch video | https://youtu.be/T4JLpYwOAoY |
@@ -94,7 +98,7 @@ The 26 October baseline reported 337 passing tests: 330 offline and 7 live RPC c
 
 ## What is next
 
-1. By 15 November 2026 (Wave 2), pay a link from a browser wallet on Mezo Testnet and record it, publish the guard as an npm package, and add a Telegram bot that creates links and reports payments.
+1. For Wave 2, seek one voluntary merchant or freelancer test through a permitted route. Record the problem, agreed task, actual outcome and feedback. Update the dated deck and video before a new submission. A public guard package and Telegram integration remain planned, not shipped.
 2. Prove a newly opened loan through the testnet review flow, then test the return to invoice payment. Add Mezo Passport so Bitcoin wallets can pay links. Mainnet loan support requires separate work and evidence.
 3. By the end of January 2027, add merchant notifications, so a small shop can take MUSD with links and see each payment confirmed without running a node.
 
