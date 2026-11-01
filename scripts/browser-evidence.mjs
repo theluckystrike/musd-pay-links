@@ -39,8 +39,11 @@ let signatureApprovals = 0;
 let walletPromptActions = 0;
 let pumpPromise;
 let evidenceWrite = Promise.resolve();
-const acted = new WeakMap();
+const actedRequests = new Set();
 const permissionReviewed = new WeakSet();
+const requestViews = new Map();
+const sidepanelRepresentations = new Map();
+let lastSidepanelScan = 0;
 const evidence = {
   startedAt: new Date().toISOString(),
   status: 'incomplete',
@@ -154,6 +157,68 @@ async function journalWalletAction(kind, action) {
 function isExtensionPage(page) {
   return !page.isClosed() && page.url().startsWith(`chrome-extension://${extensionId}/`);
 }
+function pendingSidepanelURL(raw) {
+  let url;
+  try { url = new URL(raw); } catch { return null; }
+  if (url.protocol !== 'chrome-extension:' || url.host !== extensionId || url.pathname !== '/sidepanel.html' || url.search) return null;
+  // These are existing consent routes with one opaque request ID. Never represent other surfaces.
+  if (!/^#\/(?:connect|confirmation|confirm-transaction|confirm)\/[A-Za-z0-9_-]{4,128}$/.test(url.hash)) return null;
+  if (/(?:snap|onboarding|settings)/i.test(url.hash)) return null;
+  return url;
+}
+async function pendingSidepanelTargets() {
+  let session;
+  try {
+    session = await context.newCDPSession(wallet);
+    const inventory = await bounded(() => session.send('Target.getTargets'), 5_000);
+    return inventory.targetInfos.filter((target) => target.type === 'page' && pendingSidepanelURL(target.url));
+  } finally { if (session) await session.detach().catch(() => {}); }
+}
+async function representPendingSidepanelRequests() {
+  if (Date.now() - lastSidepanelScan < 1_000) return;
+  lastSidepanelScan = Date.now();
+  const targets = await pendingSidepanelTargets();
+  const representedTargetIds = new Set([...sidepanelRepresentations.values()].map((record) => record.targetId).filter(Boolean));
+  // Filter out our own normal tabs: Target.getTargets also reports those as sidepanel.html pages.
+  const sourceTargets = targets.filter((target) => !representedTargetIds.has(target.targetId));
+  const sourceRoutes = new Set(sourceTargets.map((target) => new URL(target.url).hash));
+  for (const [route, record] of sidepanelRepresentations) {
+    if (record.page && !record.page.isClosed() && !sourceRoutes.has(route)
+      && [...actedRequests].some((key) => key.startsWith(`${route}|`))) {
+      await record.page.close();
+      record.evidence.closedAt = new Date().toISOString();
+      record.evidence.closedBecause = 'Source side panel left the acted request route';
+    }
+  }
+  if (confirmMode === 'feature-absence' && sourceTargets.length) throw new Error('Wallet prompt appeared during feature-absence check');
+  if (!pumpRunning || !walletReady || !['create-signed-invoice', 'reject-one-payment', 'send-one-payment'].includes(stage)) return;
+  for (const target of sourceTargets) {
+    const url = pendingSidepanelURL(target.url);
+    const route = url.hash;
+    if (sidepanelRepresentations.has(route)) continue; // Never reopen/retry a represented request.
+    const actualPage = context.pages().find((page) => !page.isClosed() && page.url() === target.url);
+    if (actualPage) { requestViews.set(route, actualPage); continue; }
+    check('Side-panel request representations remain bounded', sidepanelRepresentations.size < 8);
+    const publicRecord = { route, sourcePathname: url.pathname, sourceType: target.type,
+      representation: 'One normal tab at the exact already-pending authenticated same-extension prompt URL',
+      providerRequestIssuedByRepresentation: false, controllerStateInjectedByHarness: false, openedAt: new Date().toISOString() };
+    const record = { page: null, sourceTargetId: target.targetId, evidence: publicRecord };
+    sidepanelRepresentations.set(route, record); // Record BEFORE opening; failure must never cause a retry.
+    evidence.wallet.pendingPromptRepresentations ??= [];
+    evidence.wallet.pendingPromptRepresentations.push(publicRecord);
+    await checkpoint('represent-already-pending-sidepanel-request', { route });
+    if (!pumpRunning) return;
+    record.page = await context.newPage();
+    requestViews.set(route, record.page);
+    let tabSession;
+    try {
+      tabSession = await context.newCDPSession(record.page);
+      const { targetInfo } = await bounded(() => tabSession.send('Target.getTargetInfo'), 5_000);
+      record.targetId = targetInfo.targetId; // Internal only: distinguish this tab from the same-URL source.
+    } finally { if (tabSession) await tabSession.detach().catch(() => {}); }
+    await record.page.goto(target.url, { waitUntil: 'domcontentloaded' });
+  }
+}
 async function recordExtensionTargets(boundary) {
   const record = { boundary, at: new Date().toISOString(), targets: [] };
   evidence.extensionTargetInventory ??= [];
@@ -163,9 +228,13 @@ async function recordExtensionTargets(boundary) {
     session = await context.newCDPSession(wallet);
     const inventory = await bounded(() => session.send('Target.getTargets'), 5_000);
     const pageURLs = new Set(context.pages().map((page) => page.url()));
+    const representedTargetIds = new Set([...sidepanelRepresentations.values()].map((item) => item.targetId).filter(Boolean));
+    const sourceTargetIds = new Set([...sidepanelRepresentations.values()].map((item) => item.sourceTargetId));
     record.targets = inventory.targetInfos.filter((target) => target.url.startsWith(`chrome-extension://${extensionId}/`)).map((target) => {
       const url = new URL(target.url);
-      return { type: target.type, pathname: url.pathname, route: url.hash.split('?')[0], representedByPlaywrightPage: pageURLs.has(target.url) };
+      return { type: target.type, pathname: url.pathname, route: url.hash.split('?')[0],
+        representedByPlaywrightPage: sourceTargetIds.has(target.targetId) ? false : pageURLs.has(target.url),
+        normalTabRepresentation: representedTargetIds.has(target.targetId), sourceOfNormalTabRepresentation: sourceTargetIds.has(target.targetId) };
     });
     // No target titles, query strings, raw URLs, DOM, storage or target identifiers are retained.
   } catch (error) { record.failure = { errorClass: errorClass(error), reason: errorReason(error) }; }
@@ -277,7 +346,7 @@ async function appShot(name) {
 async function publicWalletShot(page, name) {
   if (!walletReady || !page.url().startsWith(`chrome-extension://${extensionId}/`)) return;
   // Save only reviewed confirmations after onboarding. Never capture home/account settings or inputs.
-  if (!/\/(?:notification|home)\.html.*#\/(?:confirmation|confirm|connect)/.test(page.url())) return;
+  if (!/\/(?:notification|home|sidepanel)\.html.*#\/(?:confirmation|confirm-transaction|confirm|connect)(?:\/|$)/.test(page.url())) return;
   if ((await page.locator('input[type="password"], [data-testid*="srp"], [data-testid*="password"]').count()) > 0) return;
   const file = `${name}.png`;
   await page.screenshot({ path: join(OUT, file), fullPage: false });
@@ -500,6 +569,16 @@ async function selectTaskAccountPermissions(page) {
 }
 async function confirmationPump() {
   while (pumpRunning && Date.now() < DEADLINE) {
+    try { await representPendingSidepanelRequests(); }
+    catch (error) {
+      const failure = { kind: 'pending-sidepanel-representation-failed', stage, errorClass: errorClass(error), reason: errorReason(error), at: new Date().toISOString() };
+      evidence.firstPumpError ??= failure;
+      evidence.confirmationFailure ??= failure;
+      pumpError ??= new Error('Pending wallet surface could not be represented safely');
+      pumpRunning = false;
+      await checkpoint('wallet-pump-failed', { reason: failure.reason });
+      return;
+    }
     for (const page of context.pages()) {
       if (page === app || page.isClosed()) continue;
       const url = page.url();
@@ -508,6 +587,10 @@ async function confirmationPump() {
       // Pending requests can render in an existing full-page wallet, not just a new notification.
       // Do not inspect ordinary home/settings pages or any onboarding/recovery route.
       if (!/\/notification\.html/.test(url) && !/#\/(?:confirmation|confirm-transaction|confirm|connect)(?:\/|$)/.test(url)) continue;
+      const requestRoute = new URL(url).hash.split('?')[0];
+      const chosenView = requestViews.get(requestRoute);
+      if (chosenView && chosenView !== page) continue;
+      requestViews.set(requestRoute, page);
       let reviewKind = 'unknown';
       let actionAttempted = false;
       try {
@@ -520,7 +603,9 @@ async function confirmationPump() {
         // UI progression can reuse one window. Its route/title/button text identify each reviewed step.
         const title = await page.getByTestId('confirm-title-text').innerText().catch(() => kind);
         const connectStep = kind === 'connect' && /Review permissions/i.test(text) ? 'review-permissions' : '';
-        const key = `${url}|${title}|${kind}|${connectStep}|${confirmMode}`;
+        // One logical request is acted only once per reviewed step, across side panel/tab views.
+        // Mode is deliberately excluded: a previously rejected request cannot be approved later.
+        const key = `${requestRoute}|${title}|${kind}|${connectStep}`;
         evidence.lastWalletScreen = {
           route: new URL(url).hash,
           kind,
@@ -528,7 +613,7 @@ async function confirmationPump() {
           // Only public button labels/identifiers. No input values, raw error stack or whole DOM.
           ...await publicButtonMetadata(page),
         };
-        if (acted.get(page) === key) continue;
+        if (actedRequests.has(key)) continue;
         if (kind === 'connect' || kind === 'signature') {
           check(`Wallet ${kind} belongs to the local test application`, /127\.0\.0\.1|localhost/.test(text));
         }
@@ -546,7 +631,7 @@ async function confirmationPump() {
           if (confirmMode === 'reject-once') {
             if (!pumpRunning || Date.now() >= DEADLINE) return;
             if (transactionRejections !== 0) throw new Error('More than one rejection request');
-            acted.set(page, key); // Save the attempt before the action, even if the window closes early.
+            actedRequests.add(key); // Save the attempt before the action, even if the window closes early.
             transactionRejections++;
             walletPromptActions++;
             await journalWalletAction(kind, 'reject');
@@ -565,7 +650,7 @@ async function confirmationPump() {
           : page.getByTestId('confirm-footer-button');
         if (!(await confirm.isVisible().catch(() => false)) || await confirm.isDisabled()) continue;
         if (!pumpRunning || Date.now() >= DEADLINE) return;
-        acted.set(page, key);
+        actedRequests.add(key);
         if (kind === 'signature') signatureApprovals++;
         if (kind === 'transaction') transactionApprovals++;
         walletPromptActions++;
